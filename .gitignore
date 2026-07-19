@@ -1,0 +1,27 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Type-checker / linter caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# uv lock is kept under version control by default; comment out to ignore
+# uv.lock
