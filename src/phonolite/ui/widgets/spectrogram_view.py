@@ -104,13 +104,28 @@ class SpectrogramView(pg.PlotWidget):
         self.image_item = pg.ImageItem(axisOrder="row-major")
         self.image_item.setLookupTable(_build_inferno_lut(256))
         self.image_item.setLevels([db_floor, db_ceil])
-        # Map buffer pixels to plot coords:
-        #   x ∈ [-history_seconds, 0]
-        #   y ∈ [0, n_freq_bins]  (relabeled via custom ticks)
+        self.addItem(self.image_item)
+
+        # IMPORTANT: setImage must run BEFORE setRect. ``ImageItem.width()`` /
+        # ``height()`` return None until image data exists, so calling setRect
+        # first silently falls back to scale=1 and the entire view ends up
+        # showing a single pixel stretched across the widget — which is what
+        # made the waterfall look "the same everywhere".
+        self.image_item.setImage(self.buffer, autoLevels=False)
         self.image_item.setRect(
             -history_seconds, 0.0, history_seconds, float(n_freq_bins)
         )
-        self.addItem(self.image_item)
+
+        # Lock both axes so the ViewBox doesn't drift / auto-fit away from
+        # the image's intended extent.
+        self.setLimits(
+            xMin=-history_seconds,
+            xMax=0.0,
+            yMin=0.0,
+            yMax=float(n_freq_bins),
+        )
+        self.setXRange(-history_seconds, 0.0, padding=0)
+        self.setYRange(0.0, float(n_freq_bins), padding=0)
 
         self._configure_y_axis()
 
