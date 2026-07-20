@@ -12,6 +12,7 @@ dependencies = [
     "numpy>=1.26",
     "scipy>=1.13",
     "sounddevice>=0.4.6",
+    "soundfile>=0.12",
     "pyqtgraph>=0.13",
 ]
 

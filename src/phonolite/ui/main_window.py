@@ -1,40 +1,52 @@
 """Top-level Phonolite window.
 
-Wires together:
+Supports two interchangeable audio sources, both feeding the same
+``frame_ready`` slot so the analysis pipeline is identical:
 
-  AudioInputStream ─▶ MainWindow._on_frame (queued slot, GUI thread)
-                            │
-                            ▼
-                       STFT.analyze
-                            │
-                            ├─▶ SpectrumPlot.update_spectrum
-                            │     └─▶ (decaying max-hold buffer)
-                            │
-                            ├─▶ SpectrogramView.add_spectrum (waterfall)
-                            │
-                            └─▶ detect_peaks on max-hold buffer
-                                  └─▶ describe_frequency
-                                       (note + cents panel)
+  • ``AudioInputStream`` — live microphone (44.1 kHz default).
+  • ``AudioFilePlayer``  — any libsndfile-supported file, played through
+                           the speakers at its native sample rate.
 
-Peak detection runs against the **max-hold** buffer, not the raw frame, so
-transient noise spikes don't trigger spurious notes. The waterfall adds a
-time dimension that lets the eye verify which peaks are sustained.
+When the file source is active the mic stream is stopped, and vice versa.
+Switching sources may change the pipeline sample rate (e.g. 44.1 kHz mic →
+48 kHz file); the STFT is rebuilt and the max-hold / waterfall are reset.
+
+Pipeline:
+
+  AudioSource.frame_ready ─▶ MainWindow._on_frame (queued, GUI thread)
+                                  │
+                                  ▼
+                              STFT.analyze
+                                  │
+                                  ├─▶ SpectrumPlot.update_spectrum
+                                  │     └─▶ (decaying max-hold buffer)
+                                  │
+                                  ├─▶ SpectrogramView.add_spectrum (waterfall)
+                                  │
+                                  └─▶ detect_peaks on max-hold ─▶ note + cents
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Optional
+
 import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QPushButton,
+    QSlider,
     QSplitter,
     QVBoxLayout,
     QWidget,
 )
 
+from phonolite.audio.file_player import AudioFilePlayer
 from phonolite.audio.input_stream import AudioInputStream
 from phonolite.dsp.peaks import Peak, detect_peaks
 from phonolite.dsp.pitch.peak_fundamental import fundamental_from_peaks
@@ -42,6 +54,12 @@ from phonolite.dsp.stft import STFT
 from phonolite.music.naming import describe_frequency
 from phonolite.ui.widgets.spectrogram_view import SpectrogramView
 from phonolite.ui.widgets.spectrum_plot import SpectrumPlot
+
+MIC_SAMPLE_RATE = 44100
+FILE_DIALOG_FILTER = (
+    "Audio Files (*.wav *.flac *.ogg *.mp3 *.opus *.aif *.aiff *.m4a);;"
+    "All Files (*.*)"
+)
 
 
 class MainWindow(QMainWindow):
@@ -51,16 +69,25 @@ class MainWindow(QMainWindow):
         self.resize(1280, 900)
 
         # --- DSP / audio config -------------------------------------------------
-        self.sample_rate = 44100
-        self.window_size = 2048        # ~46 ms at 44.1 kHz
-        self.fft_hop = self.window_size  # Phase 1: no overlap (Phase 2 will fix)
+        self.default_sample_rate = MIC_SAMPLE_RATE
+        self.sample_rate = MIC_SAMPLE_RATE
+        self.window_size = 2048
 
         self.stft = STFT(self.sample_rate, self.window_size)
+
+        # Microphone source (always available).
         self.audio = AudioInputStream(
-            sample_rate=self.sample_rate,
+            sample_rate=self.default_sample_rate,
             block_size=self.window_size,
         )
         self.audio.frame_ready.connect(self._on_frame)
+
+        # File source (created on demand).
+        self.file_player: Optional[AudioFilePlayer] = None
+
+        # Source state.
+        self._mic_running = False
+        self._source_mode = "mic"   # 'mic' or 'file'
 
         # --- UI -----------------------------------------------------------------
         central = QWidget()
@@ -69,41 +96,14 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(8)
 
-        # Top bar: transport + big note readout
-        top = QHBoxLayout()
-        self.start_btn = QPushButton("Start")
-        self.start_btn.setFixedWidth(80)
-        self.start_btn.clicked.connect(self._toggle_stream)
-
-        self.reset_btn = QPushButton("Reset")
-        self.reset_btn.setFixedWidth(70)
-        self.reset_btn.setToolTip("Clear max-hold trace and waterfall buffer.")
-        self.reset_btn.clicked.connect(self._reset_overlays)
-
-        self.device_label = QLabel(self._device_status_text())
-        self.device_label.setStyleSheet("color: #888;")
-
-        self.note_label = QLabel("—")
-        self.note_label.setAlignment(Qt.AlignCenter)
-        self.note_label.setStyleSheet(
-            "font-size: 64pt; font-weight: 600; color: #E69F00;"
-        )
-        self.cents_label = QLabel("")
-        self.cents_label.setAlignment(Qt.AlignCenter)
-        self.cents_label.setStyleSheet("font-size: 16pt; color: #aaa;")
-
-        top.addWidget(self.start_btn)
-        top.addWidget(self.reset_btn)
-        top.addWidget(self.device_label)
-        top.addStretch(1)
-        top.addWidget(self.note_label, stretch=2)
-        top.addStretch(1)
-        # Spacer to visually balance the left-side controls.
-        top.addSpacing(80 + 70 + 12 + 2)
-        root.addLayout(top)
-
+        root.addLayout(self._build_top_bar())
         root.addWidget(self.cents_label)
         root.addWidget(self._separator())
+
+        # File transport row (hidden until a file is loaded).
+        self.file_transport = self._build_file_transport()
+        root.addWidget(self.file_transport)
+        self.file_transport.setVisible(False)
 
         # Spectrum + spectrogram in a vertical splitter.
         self.spectrum = SpectrumPlot(decay_db_per_sec=6.0)
@@ -129,16 +129,89 @@ class MainWindow(QMainWindow):
         self.peak_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         root.addWidget(self.peak_label)
 
-        self._running = False
+        self._refresh_source_label()
+
+    # --- UI construction ------------------------------------------------------
+
+    def _build_top_bar(self) -> QHBoxLayout:
+        top = QHBoxLayout()
+
+        self.start_btn = QPushButton("Start Mic")
+        self.start_btn.setFixedWidth(90)
+        self.start_btn.setToolTip("Toggle live microphone input.")
+        self.start_btn.clicked.connect(self._toggle_mic)
+
+        self.open_file_btn = QPushButton("Open File…")
+        self.open_file_btn.clicked.connect(self._open_file_dialog)
+
+        self.reset_btn = QPushButton("Reset")
+        self.reset_btn.setFixedWidth(70)
+        self.reset_btn.setToolTip("Clear max-hold trace and waterfall buffer.")
+        self.reset_btn.clicked.connect(self._reset_overlays)
+
+        self.source_label = QLabel("")
+        self.source_label.setStyleSheet("color: #888;")
+
+        self.note_label = QLabel("—")
+        self.note_label.setAlignment(Qt.AlignCenter)
+        self.note_label.setStyleSheet(
+            "font-size: 64pt; font-weight: 600; color: #E69F00;"
+        )
+        self.cents_label = QLabel("")
+        self.cents_label.setAlignment(Qt.AlignCenter)
+        self.cents_label.setStyleSheet("font-size: 16pt; color: #aaa;")
+
+        top.addWidget(self.start_btn)
+        top.addWidget(self.open_file_btn)
+        top.addWidget(self.reset_btn)
+        top.addWidget(self.source_label)
+        top.addStretch(1)
+        top.addWidget(self.note_label, stretch=2)
+        top.addStretch(1)
+        # Spacer balances the left-side control cluster visually.
+        top.addSpacing(90 + 80 + 12 + 4)
+        return top
+
+    def _build_file_transport(self) -> QWidget:
+        bar = QWidget()
+        h = QHBoxLayout(bar)
+        h.setContentsMargins(0, 0, 0, 0)
+
+        self.play_pause_btn = QPushButton("Pause")
+        self.play_pause_btn.setFixedWidth(80)
+        self.play_pause_btn.clicked.connect(self._toggle_playback)
+
+        self.stop_btn = QPushButton("Stop")
+        self.stop_btn.setFixedWidth(70)
+        self.stop_btn.setToolTip("Stop and unload the current file.")
+        self.stop_btn.clicked.connect(self._close_file)
+
+        self.filename_label = QLabel("")
+        self.filename_label.setStyleSheet(
+            "color: #aaa; font-family: Consolas, monospace;"
+        )
+
+        self.position_slider = QSlider(Qt.Horizontal)
+        self.position_slider.setMinimum(0)
+        self.position_slider.setMaximum(1000)
+        # sliderMoved fires only on user drag, avoiding a feedback loop with
+        # the programmatic value updates we drive from position_changed.
+        self.position_slider.sliderMoved.connect(self._on_slider_seek)
+
+        self.time_label = QLabel("0:00 / 0:00")
+        self.time_label.setStyleSheet(
+            "color: #ccc; font-family: Consolas, monospace;"
+        )
+        self.time_label.setMinimumWidth(110)
+
+        h.addWidget(self.play_pause_btn)
+        h.addWidget(self.stop_btn)
+        h.addWidget(self.filename_label, stretch=2)
+        h.addWidget(self.position_slider, stretch=4)
+        h.addWidget(self.time_label)
+        return bar
 
     # --- helpers --------------------------------------------------------------
-
-    def _device_status_text(self) -> str:
-        try:
-            dev = AudioInputStream.default_input_device()
-            return f"device: {dev['name']}  ({dev['default_samplerate']:.0f} Hz)"
-        except Exception as exc:  # noqa: BLE001
-            return f"device: unavailable ({exc})"
 
     def _separator(self) -> QWidget:
         line = QWidget()
@@ -146,30 +219,185 @@ class MainWindow(QMainWindow):
         line.setStyleSheet("background: #333;")
         return line
 
-    # --- transport ------------------------------------------------------------
+    @staticmethod
+    def _format_time(seconds: float) -> str:
+        s = max(0, int(round(seconds)))
+        return f"{s // 60}:{s % 60:02d}"
 
-    def _toggle_stream(self) -> None:
-        if self._running:
-            self.audio.stop()
-            self.start_btn.setText("Start")
-            self._running = False
-            self.note_label.setText("—")
-            self.cents_label.setText("")
-            self.peak_label.setText("Top peaks: —")
-            self.spectrum.clear_view()
-            self.spectrogram.clear_view()
+    def _refresh_source_label(self) -> None:
+        try:
+            dev = AudioInputStream.default_input_device()
+            mic_text = f"mic: {dev['name']} ({self.default_sample_rate} Hz)"
+        except Exception:  # noqa: BLE001
+            mic_text = f"mic: unavailable ({self.default_sample_rate} Hz)"
+        if self._source_mode == "file" and self.file_player is not None:
+            self.source_label.setText(
+                f"▶ {self.file_player.file_path.name}  "
+                f"({self.file_player.sample_rate} Hz, "
+                f"{self.file_player.channels}ch)"
+            )
         else:
+            self.source_label.setText(mic_text)
+
+    def _set_sample_rate(self, rate: int) -> None:
+        if rate == self.sample_rate:
+            return
+        self.sample_rate = rate
+        self.stft = STFT(rate, self.window_size)
+        # Bins changed → max-hold and waterfall must be rebuilt from scratch.
+        self.spectrum.reset_maxhold()
+        self.spectrogram.clear_view()
+
+    # --- mic transport --------------------------------------------------------
+
+    def _toggle_mic(self) -> None:
+        if self._mic_running:
+            self.audio.stop()
+            self._mic_running = False
+            self.start_btn.setText("Start Mic")
+            self._clear_readouts()
+        else:
+            # Mic and file are mutually exclusive.
+            if self._source_mode == "file":
+                self._close_file()
             try:
                 self.audio.start()
             except Exception as exc:  # noqa: BLE001
-                self.peak_label.setText(f"Failed to open stream:\n{exc}")
+                QMessageBox.warning(self, "Microphone", f"Failed to open stream:\n{exc}")
                 return
-            self.start_btn.setText("Stop")
-            self._running = True
+            self._mic_running = True
+            self._source_mode = "mic"
+            self.start_btn.setText("Stop Mic")
+            self._set_sample_rate(self.default_sample_rate)
+            self._refresh_source_label()
+
+    # --- file transport -------------------------------------------------------
+
+    def _open_file_dialog(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open Audio File", "", FILE_DIALOG_FILTER
+        )
+        if not path:
+            return
+        self._load_file(path)
+
+    def _load_file(self, path: str) -> None:
+        # Tear down any active source first.
+        if self._mic_running:
+            self.audio.stop()
+            self._mic_running = False
+            self.start_btn.setText("Start Mic")
+        if self.file_player is not None:
+            self._disconnect_file_player()
+            self.file_player.stop()
+
+        try:
+            self.file_player = AudioFilePlayer(path, block_size=self.window_size)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Open File", f"Failed to open file:\n{exc}")
+            self.file_player = None
+            return
+
+        self._source_mode = "file"
+        self._set_sample_rate(self.file_player.sample_rate)
+
+        # Wire signals.
+        self.file_player.frame_ready.connect(self._on_frame)
+        self.file_player.state_changed.connect(self._on_file_state_changed)
+        self.file_player.position_changed.connect(self._on_position_changed)
+
+        # Configure transport UI.
+        self.filename_label.setText(self.file_player.file_path.name)
+        self.position_slider.setValue(0)
+        self.time_label.setText(
+            f"0:00 / {self._format_time(self.file_player.duration)}"
+        )
+        self.play_pause_btn.setText("Pause")
+        self.file_transport.setVisible(True)
+        self._clear_readouts()
+        self._refresh_source_label()
+
+        # Auto-start playback.
+        self.file_player.play()
+
+    def _close_file(self) -> None:
+        if self.file_player is None:
+            return
+        self._disconnect_file_player()
+        self.file_player.stop()
+        self.file_player = None
+        self._source_mode = "mic"
+        self.file_transport.setVisible(False)
+        self._set_sample_rate(self.default_sample_rate)
+        self._clear_readouts()
+        self._refresh_source_label()
+
+    def _disconnect_file_player(self) -> None:
+        if self.file_player is None:
+            return
+        try:
+            self.file_player.frame_ready.disconnect(self._on_frame)
+        except RuntimeError:
+            pass  # already disconnected
+        try:
+            self.file_player.state_changed.disconnect(self._on_file_state_changed)
+        except RuntimeError:
+            pass
+        try:
+            self.file_player.position_changed.disconnect(self._on_position_changed)
+        except RuntimeError:
+            pass
+
+    def _toggle_playback(self) -> None:
+        if self.file_player is None:
+            return
+        if self.file_player.state == "playing":
+            self.file_player.pause()
+        else:
+            self.file_player.play()
+
+    def _on_file_state_changed(self, state: str) -> None:
+        if state == "playing":
+            self.play_pause_btn.setText("Pause")
+        elif state == "paused":
+            self.play_pause_btn.setText("Play")
+        elif state == "finished":
+            self.play_pause_btn.setText("Replay")
+        elif state == "stopped":
+            # File closed externally — leave UI to _close_file.
+            pass
+
+    def _on_position_changed(self, seconds: float) -> None:
+        if self.file_player is None or self.file_player.duration <= 0:
+            return
+        ratio = max(0.0, min(seconds / self.file_player.duration, 1.0))
+        # Block signals to avoid sliderMoved firing back into seek().
+        was_blocked = self.position_slider.blockSignals(True)
+        self.position_slider.setValue(int(ratio * 1000))
+        self.position_slider.blockSignals(was_blocked)
+        self.time_label.setText(
+            f"{self._format_time(seconds)} / "
+            f"{self._format_time(self.file_player.duration)}"
+        )
+
+    def _on_slider_seek(self, slider_value: int) -> None:
+        if self.file_player is None or self.file_player.duration <= 0:
+            return
+        seconds = slider_value / 1000.0 * self.file_player.duration
+        self.file_player.seek(seconds)
+
+    # --- shared ---------------------------------------------------------------
 
     def _reset_overlays(self) -> None:
-        """Clear the max-hold trace and waterfall history without stopping audio."""
+        """Clear max-hold and waterfall without affecting the active source."""
         self.spectrum.reset_maxhold()
+        self.spectrogram.clear_view()
+
+    def _clear_readouts(self) -> None:
+        self.note_label.setText("—")
+        self.cents_label.setText("")
+        self.peak_label.setText("Top peaks: —")
+        self.spectrum.clear_view()
         self.spectrogram.clear_view()
 
     # --- DSP pipeline (GUI thread via queued signal) --------------------------
@@ -177,24 +405,20 @@ class MainWindow(QMainWindow):
     def _on_frame(self, samples: object) -> None:
         block = np.asarray(samples, dtype=np.float32)
         if block.shape != (self.window_size,):
-            # Drop short blocks (e.g. on stream stop). Overlap is Phase 2.
+            # Drop short blocks (e.g. partial read at file EOF).
             return
 
         spectrum = self.stft.analyze(block.astype(np.float64))
 
-        # Update live + max-hold spectrum, then push to the waterfall.
         self.spectrum.update_spectrum(spectrum.freqs, spectrum.magnitude_db)
         self.spectrogram.add_spectrum(spectrum.freqs, spectrum.magnitude_db)
 
-        # Run peak detection on the max-hold buffer — much more noise-robust
-        # than the live frame, because transient spikes decay away before
-        # they reach the prominence threshold.
         maxhold = self.spectrum.maxhold_data()
         peak_source_db = maxhold if maxhold is not None else spectrum.magnitude_db
         peaks = detect_peaks(
             spectrum.freqs,
             peak_source_db,
-            min_prominence_db=10.0,  # lower than MVP because max-hold is cleaner
+            min_prominence_db=10.0,
             max_peaks=6,
         )
 
@@ -247,6 +471,8 @@ class MainWindow(QMainWindow):
     # --- shutdown -------------------------------------------------------------
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
-        if self._running:
+        if self._mic_running:
             self.audio.stop()
+        if self.file_player is not None:
+            self.file_player.stop()
         super().closeEvent(event)

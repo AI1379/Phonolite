@@ -29,6 +29,12 @@ bowls, ambient/drone sounds, percussion).
   buffer, so transient noise spikes no longer produce spurious notes.
 - [x] **Reset button** to clear max-hold + waterfall history without
   restarting the audio stream.
+- [x] **Audio file playback** — open any libsndfile-supported format (WAV,
+  FLAC, OGG, MP3, Opus, AIFF, …) via `Open File…`. The file plays through
+  the speakers while the same live pipeline (spectrum + waterfall + peaks)
+  visualises it. Transport bar with Play/Pause, Stop, seekable slider, and
+  time display. Mic and file sources are mutually exclusive; switching
+  sources rebuilds the STFT at the new sample rate.
 - [ ] Overlapping STFT (currently one block == one window)
 - [ ] Real pitch detection: YIN, Harmonic Product Spectrum
 - [ ] Spectral features on the UI: centroid, flatness, inharmonicity
@@ -56,19 +62,31 @@ the dominant peak's note should update in real time.
 ## Architecture
 
 ```
-AudioInputStream (QObject)        ← runs PortAudio callback on its own thread
-        │  frame_ready = Signal(object)
-        ▼ (auto-queued, GUI thread)
-MainWindow._on_frame
-        ├─ STFT.analyze          ← scipy Hann window + numpy rFFT
-        │
-        ├─ SpectrumPlot.update_spectrum
-        │     └─▶ (decaying max-hold buffer)
-        │
-        ├─ SpectrogramView.add_spectrum  ← rolling waterfall
-        │
-        └─ detect_peaks on max-hold ─▶ describe_frequency ─▶ note + cents
+                    ┌─────────────────────┐
+                    │   AudioSource       │
+                    │   (frame_ready)     │
+                    └──────────┬──────────┘
+            ┌──────────────────┴──────────────────┐
+            ▼                                     ▼
+   AudioInputStream (mic, 44.1k)       AudioFilePlayer (file, native rate)
+            │                                     │
+            └──────────────────┬──────────────────┘
+                               ▼ (auto-queued, GUI thread)
+                      MainWindow._on_frame
+                               │
+                               ├─ STFT.analyze (rebuilt when sample rate changes)
+                               │
+                               ├─ SpectrumPlot.update_spectrum
+                               │     └─▶ (decaying max-hold buffer)
+                               │
+                               ├─ SpectrogramView.add_spectrum  (rolling waterfall)
+                               │
+                               └─ detect_peaks on max-hold ─▶ describe_frequency
 ```
+
+Mic and file sources are mutually exclusive. Opening a file stops the mic,
+rebuilds the STFT at the file's native sample rate, and resets max-hold +
+waterfall; closing the file reverts to the mic sample rate.
 
 Phase 2 (next): replace the simple "one block == one window" hop with a
 `RingBuffer`-driven overlapping STFT, and swap the peak-based fundamental
@@ -79,7 +97,8 @@ heuristic for YIN / HPS.
 ```
 src/phonolite/
 ├── audio/
-│   ├── input_stream.py     QThread-friendly mic capture
+│   ├── input_stream.py     microphone capture (QSignal + sounddevice)
+│   ├── file_player.py      file playback (QSignal + soundfile + sounddevice)
 │   └── ring_buffer.py      (placeholder for Phase 2 overlap)
 ├── dsp/
 │   ├── stft.py             Hann-windowed magnitude spectrum
@@ -93,10 +112,10 @@ src/phonolite/
 ├── music/
 │   └── naming.py           freq ↔ note / cents / interval
 └── ui/
-    ├── main_window.py
+    ├── main_window.py            source switching + transport
     └── widgets/
-        ├── spectrum_plot.py     live + max-hold + peak markers
-        └── spectrogram_view.py  rolling waterfall (Phase 2)
+        ├── spectrum_plot.py      live + max-hold + peak markers
+        └── spectrogram_view.py   rolling waterfall
 ```
 
 ## Dependencies
