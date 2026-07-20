@@ -33,7 +33,7 @@ Pipeline:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 from PySide6.QtCore import Qt
@@ -62,6 +62,57 @@ from phonolite.ui.widgets.chroma_view import ChromaView
 from phonolite.ui.widgets.piano_roll_view import PianoRollView, midi_to_name
 from phonolite.ui.widgets.spectrogram_view import SpectrogramView
 from phonolite.ui.widgets.spectrum_plot import SpectrumPlot
+
+
+class _PanelWrapper(QWidget):
+    """Thin header bar + plot widget, with a maximize toggle button.
+
+    Lays out the plot as the primary content area and a 22 px header
+    strip that shows the panel name and a small ``Max`` / ``Restore``
+    button. When maximised the button text flips and the wrapper can
+    be collapsed by an external controller.
+    """
+
+    def __init__(
+        self, title: str, widget: QWidget, on_maximize, parent=None
+    ) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+
+        # ----- header -----------------------------------------------------------
+        header = QWidget()
+        header.setFixedHeight(22)
+        header.setStyleSheet("background: #222;")
+        hdr = QHBoxLayout(header)
+        hdr.setContentsMargins(6, 0, 2, 0)
+
+        title_lbl = QLabel(title)
+        title_lbl.setStyleSheet("color: #999; font-size: 10pt; background: transparent;")
+
+        self._max_btn = QPushButton("Max")
+        self._max_btn.setFixedSize(44, 18)
+        self._max_btn.setStyleSheet(
+            "QPushButton { background: #333; border: none; color: #aaa; "
+            "font-size: 8pt; } "
+            "QPushButton:hover { background: #555; color: #fff; }"
+        )
+        self._max_btn.clicked.connect(lambda: on_maximize(self))
+
+        hdr.addWidget(title_lbl)
+        hdr.addStretch()
+        hdr.addWidget(self._max_btn)
+        layout.addWidget(header)
+
+        # ----- panel body -------------------------------------------------------
+        layout.addWidget(widget, stretch=1)
+        self._widget = widget
+        self._maximized = False
+
+    def set_maximized(self, maximized: bool) -> None:
+        self._maximized = maximized
+        self._max_btn.setText("Restore" if maximized else "Max")
 
 MIC_SAMPLE_RATE = 44100
 FILE_DIALOG_FILTER = (
@@ -129,17 +180,42 @@ class MainWindow(QMainWindow):
             target_fps=30.0,
         )
 
-        splitter = QSplitter(Qt.Vertical)
-        splitter.addWidget(self.spectrum)
-        splitter.addWidget(self.spectrogram)
-        splitter.addWidget(self.piano_roll)
-        splitter.addWidget(self.chroma)
-        # Piano-roll gets the biggest share — it's the primary
-        # transcription view. Spectrum + spectrogram are diagnostic.
-        splitter.setSizes([140, 140, 280, 90])
-        for i in range(splitter.count()):
-            splitter.setCollapsible(i, False)
-        root.addWidget(splitter, stretch=1)
+        # Click on the piano-roll waterfall → seek the file player to that
+        # point (the core transcription scrub workflow).
+        self.piano_roll.clicked_at_time.connect(self._on_waterfall_click)
+
+        # Wrap each plot in a _PanelWrapper so the user can maximise one
+        # view to fill the entire grid area.
+        self._panel_wrappers = [
+            _PanelWrapper("Spectrum",     self.spectrum,     self._toggle_maximize),
+            _PanelWrapper("Spectrogram",  self.spectrogram,  self._toggle_maximize),
+            _PanelWrapper("Piano Roll",   self.piano_roll,   self._toggle_maximize),
+            _PanelWrapper("Chroma",       self.chroma,       self._toggle_maximize),
+        ]
+
+        top_row = QSplitter(Qt.Horizontal)
+        top_row.addWidget(self._panel_wrappers[0])
+        top_row.addWidget(self._panel_wrappers[1])
+
+        bottom_row = QSplitter(Qt.Horizontal)
+        bottom_row.addWidget(self._panel_wrappers[2])
+        bottom_row.addWidget(self._panel_wrappers[3])
+
+        self._panel_splitter = QSplitter(Qt.Vertical)
+        self._panel_splitter.addWidget(top_row)
+        self._panel_splitter.addWidget(bottom_row)
+        # Top row ~25 %, bottom ~75 % — piano-roll is the transcription
+        # workhorse and deserves most of the space.
+        self._panel_splitter.setSizes([160, 400])
+        top_row.setSizes([240, 240])
+        bottom_row.setSizes([400, 200])
+        self._top_row = top_row
+        self._bottom_row = bottom_row
+
+        self._maximized_index: Optional[int] = None
+        self._saved_sizes: Optional[dict] = None
+
+        root.addWidget(self._panel_splitter, stretch=1)
 
         # Peak list (text)
         self.peak_label = QLabel("Top peaks: —")
@@ -404,6 +480,59 @@ class MainWindow(QMainWindow):
             return
         seconds = slider_value / 1000.0 * self.file_player.duration
         self.file_player.seek(seconds)
+
+    # --- maximise / restore grid ------------------------------------------------
+
+    def _toggle_maximize(self, wrapper: _PanelWrapper) -> None:
+        """Called when a ``Max`` / ``Restore`` button is clicked."""
+        try:
+            idx = self._panel_wrappers.index(wrapper)
+        except ValueError:
+            return
+        if self._maximized_index == idx:
+            self._restore_panels()
+        else:
+            self._maximize_panel(idx)
+
+    def _maximize_panel(self, idx: int) -> None:
+        self._saved_sizes = {
+            "main": list(self._panel_splitter.sizes()),
+            "top": list(self._top_row.sizes()),
+            "bottom": list(self._bottom_row.sizes()),
+        }
+        for i, w in enumerate(self._panel_wrappers):
+            w.setVisible(i == idx)
+            w.set_maximized(i == idx)
+        self._maximized_index = idx
+
+    def _restore_panels(self) -> None:
+        if self._saved_sizes is None:
+            return
+        for w in self._panel_wrappers:
+            w.setVisible(True)
+            w.set_maximized(False)
+        self._maximized_index = None
+        self._panel_splitter.setSizes(self._saved_sizes["main"])
+        self._top_row.setSizes(self._saved_sizes["top"])
+        self._bottom_row.setSizes(self._saved_sizes["bottom"])
+        self._saved_sizes = None
+
+    # --- waterfall click → seek -------------------------------------------------
+
+    def _on_waterfall_click(self, time_offset: float) -> None:
+        """Seek the file player to the clicked waterfall column.
+
+        ``time_offset`` is in seconds relative to *now* (negative = past).
+        """
+        if self.file_player is None or self.file_player.state == "stopped":
+            return
+        new_pos = self.file_player.position + time_offset
+        if new_pos < 0:
+            new_pos = 0.0
+        self.file_player.seek(new_pos)
+        # If paused, auto-play so the user hears the replayed section.
+        if self.file_player.state == "paused":
+            self.file_player.play()
 
     # --- shared ---------------------------------------------------------------
 

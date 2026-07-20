@@ -42,13 +42,18 @@ bowls, ambient/drone sounds, percussion).
   also summarised in the text panel. Designed for dense polyphony
   (orchestral, chords) where per-peak readouts become unreadable.
 - [x] **Piano-roll waterfall (MIDI-resolution)** — semitone-spaced
-  waterfall with note names on the y-axis (C2 … C6). Preserves octave
-  information, so chord voicings, doublings, and inversions are directly
-  readable. Per-frame normalised: the strongest note lands at the top of
-  the colour map regardless of input level. Built for **transcription**.
+  watermark with note names on the y-axis (C2 … C6). Preserves octave
+  information for transcription. Per-frame normalised.
 - [x] **Active-notes text readout** — top-N strongest MIDI notes (with
-  octave) printed in the peak panel every frame. Read like a chord chart
-  while the music plays.
+  octave) printed in the peak panel.
+- [x] **2x2 panel grid + maximise** — panels are arranged in a resizable
+  grid (Spectrum | Spectrogram over Piano Roll | Chroma). Each panel has
+  a ``Max`` / ``Restore`` button that expands it to fill the full grid
+  area, hiding the other three — ideal for focusing on one view while
+  transcribing.
+- [x] **Click-to-seek on piano-roll** — click any column of the waterfall
+  to seek the audio file to that point (and auto-play if paused). Lets
+  you scrub back to a point of interest without touching the slider.
 - [ ] Overlapping STFT (currently one block == one window)
 - [ ] Real pitch detection: YIN, Harmonic Product Spectrum
 - [ ] Multi-F0 estimation (Klapuri iterative harmonic subtraction)

@@ -23,7 +23,8 @@ from __future__ import annotations
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor
 
 from phonolite.dsp.chroma import PITCH_CLASS_NAMES
 from phonolite.dsp.pitch_grid import compute_pitch_grid
@@ -51,6 +52,12 @@ def midi_to_name(midi: int) -> str:
 
 class PianoRollView(pg.PlotWidget):
     """Rolling waterfall with semitone y-resolution, for transcription."""
+
+    # Emitted when the user clicks on the waterfall. ``time_offset`` is in
+    # seconds relative to "now" (negative = past, 0 = current frame).
+    # The host window can use this to seek a file player back to the
+    # clicked point — the core transcription scrub workflow.
+    clicked_at_time = Signal(float)
 
     def __init__(
         self,
@@ -166,3 +173,13 @@ class PianoRollView(pg.PlotWidget):
     def clear_view(self) -> None:
         self.buffer.fill(self.db_floor)
         self.image_item.setImage(self.buffer, autoLevels=False)
+
+    def mousePressEvent(self, ev) -> None:
+        if ev.button() == Qt.LeftButton:
+            vb = self.getViewBox()
+            pos = vb.mapSceneToView(ev.scenePos())
+            t = float(pos.x())
+            # Only emit if inside the chart area (not axis labels / margins).
+            if -self.history_seconds <= t <= 0:
+                self.clicked_at_time.emit(t)
+        super().mousePressEvent(ev)
