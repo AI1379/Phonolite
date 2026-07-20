@@ -14,16 +14,20 @@ Switching sources may change the pipeline sample rate (e.g. 44.1 kHz mic →
 Pipeline:
 
   AudioSource.frame_ready ─▶ MainWindow._on_frame (queued, GUI thread)
-                                  │
-                                  ▼
-                              STFT.analyze
-                                  │
-                                  ├─▶ SpectrumPlot.update_spectrum
-                                  │     └─▶ (decaying max-hold buffer)
-                                  │
-                                  ├─▶ SpectrogramView.add_spectrum (waterfall)
-                                  │
-                                  └─▶ detect_peaks on max-hold ─▶ note + cents
+                                   │
+                                   ▼
+                               STFT.analyze
+                                   │
+                                   ├─▶ SpectrumPlot.update_spectrum
+                                   │     └─▶ (decaying max-hold buffer)
+                                   │
+                                   ├─▶ SpectrogramView.add_spectrum (Hz waterfall)
+                                   │
+                                   ├─▶ PianoRollView.add_spectrum (MIDI waterfall)
+                                   │
+                                   ├─▶ detect_peaks on max-hold ─▶ note + cents
+                                   │
+                                   └─▶ compute_chroma / top_midi_notes (text + bars)
 """
 
 from __future__ import annotations
@@ -51,9 +55,11 @@ from phonolite.audio.input_stream import AudioInputStream
 from phonolite.dsp.chroma import compute_chroma, top_pitch_classes
 from phonolite.dsp.peaks import Peak, detect_peaks
 from phonolite.dsp.pitch.peak_fundamental import fundamental_from_peaks
+from phonolite.dsp.pitch_grid import compute_pitch_grid, top_midi_notes
 from phonolite.dsp.stft import STFT
 from phonolite.music.naming import describe_frequency
 from phonolite.ui.widgets.chroma_view import ChromaView
+from phonolite.ui.widgets.piano_roll_view import PianoRollView, midi_to_name
 from phonolite.ui.widgets.spectrogram_view import SpectrogramView
 from phonolite.ui.widgets.spectrum_plot import SpectrumPlot
 
@@ -107,7 +113,7 @@ class MainWindow(QMainWindow):
         root.addWidget(self.file_transport)
         self.file_transport.setVisible(False)
 
-        # Spectrum + spectrogram + chroma in a vertical splitter.
+        # Spectrum + spectrogram + chroma + piano-roll in a vertical splitter.
         self.spectrum = SpectrumPlot(decay_db_per_sec=6.0)
         self.spectrogram = SpectrogramView(
             sample_rate=self.sample_rate,
@@ -116,15 +122,23 @@ class MainWindow(QMainWindow):
             target_fps=30.0,
         )
         self.chroma = ChromaView()
+        self.piano_roll = PianoRollView(
+            midi_min=36,   # C2
+            midi_max=96,   # C6
+            history_seconds=10.0,
+            target_fps=30.0,
+        )
 
         splitter = QSplitter(Qt.Vertical)
         splitter.addWidget(self.spectrum)
         splitter.addWidget(self.spectrogram)
+        splitter.addWidget(self.piano_roll)
         splitter.addWidget(self.chroma)
-        splitter.setSizes([320, 320, 120])
-        splitter.setCollapsible(0, False)
-        splitter.setCollapsible(1, False)
-        splitter.setCollapsible(2, False)
+        # Piano-roll gets the biggest share — it's the primary
+        # transcription view. Spectrum + spectrogram are diagnostic.
+        splitter.setSizes([140, 140, 280, 90])
+        for i in range(splitter.count()):
+            splitter.setCollapsible(i, False)
         root.addWidget(splitter, stretch=1)
 
         # Peak list (text)
@@ -397,6 +411,7 @@ class MainWindow(QMainWindow):
         """Clear max-hold and waterfall without affecting the active source."""
         self.spectrum.reset_maxhold()
         self.spectrogram.clear_view()
+        self.piano_roll.clear_view()
 
     def _clear_readouts(self) -> None:
         self.note_label.setText("—")
@@ -404,6 +419,7 @@ class MainWindow(QMainWindow):
         self.peak_label.setText("Top peaks: —")
         self.spectrum.clear_view()
         self.spectrogram.clear_view()
+        self.piano_roll.clear_view()
         self.chroma.clear_view()
 
     # --- DSP pipeline (GUI thread via queued signal) --------------------------
@@ -432,6 +448,9 @@ class MainWindow(QMainWindow):
         self._update_note_panel(peaks)
         self._update_peak_panel(peaks)
         self._update_chroma_panel(spectrum.freqs, peak_source_db)
+        # Piano-roll and "active notes" readout both use the max-hold
+        # buffer — same noise-rejection as chroma and peak detection.
+        self.piano_roll.add_spectrum(spectrum.freqs, peak_source_db)
 
     def _update_note_panel(self, peaks: list[Peak]) -> None:
         if not peaks:
@@ -473,8 +492,20 @@ class MainWindow(QMainWindow):
             lines.append(
                 f"  #{i}  {p.freq:7.1f} Hz   {p.magnitude_db:6.1f} dB   {note_str}"
             )
-        # Append a compact chroma readout so dense polyphony (where the per-peak
-        # list above is meaningless) still gets a textual summary.
+
+        # Dense-polyphony summaries: top MIDI notes (with octave) + top
+        # pitch classes. These are the lines a transcriber actually reads.
+        try:
+            maxhold = self.spectrum.maxhold_data()
+            if maxhold is not None:
+                grid = compute_pitch_grid(self.stft._freqs, maxhold)
+                top_notes = top_midi_notes(grid, midi_min=36, k=6, threshold_ratio=0.3)
+                if top_notes:
+                    names = " ".join(midi_to_name(m) for m, _ in top_notes)
+                    lines.append(f"  active notes: {names}")
+        except Exception:
+            pass
+
         try:
             maxhold = self.spectrum.maxhold_data()
             if maxhold is not None:

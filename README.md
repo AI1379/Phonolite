@@ -41,6 +41,14 @@ bowls, ambient/drone sounds, percussion).
   doesn't pollute it. Top-3 pitch classes are highlighted in orange and
   also summarised in the text panel. Designed for dense polyphony
   (orchestral, chords) where per-peak readouts become unreadable.
+- [x] **Piano-roll waterfall (MIDI-resolution)** — semitone-spaced
+  waterfall with note names on the y-axis (C2 … C6). Preserves octave
+  information, so chord voicings, doublings, and inversions are directly
+  readable. Per-frame normalised: the strongest note lands at the top of
+  the colour map regardless of input level. Built for **transcription**.
+- [x] **Active-notes text readout** — top-N strongest MIDI notes (with
+  octave) printed in the peak panel every frame. Read like a chord chart
+  while the music plays.
 - [ ] Overlapping STFT (currently one block == one window)
 - [ ] Real pitch detection: YIN, Harmonic Product Spectrum
 - [ ] Multi-F0 estimation (Klapuri iterative harmonic subtraction)
@@ -111,7 +119,8 @@ src/phonolite/
 ├── dsp/
 │   ├── stft.py             Hann-windowed magnitude spectrum
 │   ├── peaks.py            peak find + parabolic refinement
-│   ├── chroma.py           12-bin pitch-class projection
+│   ├── chroma.py           12-bin pitch-class projection (octave-folded)
+│   ├── pitch_grid.py       MIDI-resolution projection (octave-preserving)
 │   ├── pitch/
 │   │   ├── peak_fundamental.py   MVP heuristic
 │   │   ├── yin.py                (Phase 2)
@@ -124,7 +133,8 @@ src/phonolite/
     ├── main_window.py            source switching + transport
     └── widgets/
         ├── spectrum_plot.py      live + max-hold + peak markers
-        ├── spectrogram_view.py   rolling waterfall
+        ├── spectrogram_view.py   Hz waterfall (diagnostic)
+        ├── piano_roll_view.py    MIDI waterfall (transcription)
         └── chroma_view.py        12-bar pitch-class histogram
 ```
 
