@@ -48,10 +48,12 @@ from PySide6.QtWidgets import (
 
 from phonolite.audio.file_player import AudioFilePlayer
 from phonolite.audio.input_stream import AudioInputStream
+from phonolite.dsp.chroma import compute_chroma, top_pitch_classes
 from phonolite.dsp.peaks import Peak, detect_peaks
 from phonolite.dsp.pitch.peak_fundamental import fundamental_from_peaks
 from phonolite.dsp.stft import STFT
 from phonolite.music.naming import describe_frequency
+from phonolite.ui.widgets.chroma_view import ChromaView
 from phonolite.ui.widgets.spectrogram_view import SpectrogramView
 from phonolite.ui.widgets.spectrum_plot import SpectrumPlot
 
@@ -105,7 +107,7 @@ class MainWindow(QMainWindow):
         root.addWidget(self.file_transport)
         self.file_transport.setVisible(False)
 
-        # Spectrum + spectrogram in a vertical splitter.
+        # Spectrum + spectrogram + chroma in a vertical splitter.
         self.spectrum = SpectrumPlot(decay_db_per_sec=6.0)
         self.spectrogram = SpectrogramView(
             sample_rate=self.sample_rate,
@@ -113,13 +115,16 @@ class MainWindow(QMainWindow):
             history_seconds=5.0,
             target_fps=30.0,
         )
+        self.chroma = ChromaView()
 
         splitter = QSplitter(Qt.Vertical)
         splitter.addWidget(self.spectrum)
         splitter.addWidget(self.spectrogram)
-        splitter.setSizes([360, 360])
+        splitter.addWidget(self.chroma)
+        splitter.setSizes([320, 320, 120])
         splitter.setCollapsible(0, False)
         splitter.setCollapsible(1, False)
+        splitter.setCollapsible(2, False)
         root.addWidget(splitter, stretch=1)
 
         # Peak list (text)
@@ -399,6 +404,7 @@ class MainWindow(QMainWindow):
         self.peak_label.setText("Top peaks: —")
         self.spectrum.clear_view()
         self.spectrogram.clear_view()
+        self.chroma.clear_view()
 
     # --- DSP pipeline (GUI thread via queued signal) --------------------------
 
@@ -425,6 +431,7 @@ class MainWindow(QMainWindow):
         self.spectrum.update_peaks(peaks)
         self._update_note_panel(peaks)
         self._update_peak_panel(peaks)
+        self._update_chroma_panel(spectrum.freqs, peak_source_db)
 
     def _update_note_panel(self, peaks: list[Peak]) -> None:
         if not peaks:
@@ -466,7 +473,25 @@ class MainWindow(QMainWindow):
             lines.append(
                 f"  #{i}  {p.freq:7.1f} Hz   {p.magnitude_db:6.1f} dB   {note_str}"
             )
+        # Append a compact chroma readout so dense polyphony (where the per-peak
+        # list above is meaningless) still gets a textual summary.
+        try:
+            maxhold = self.spectrum.maxhold_data()
+            if maxhold is not None:
+                from phonolite.dsp.chroma import PITCH_CLASS_NAMES
+                chroma = compute_chroma(self.stft._freqs, maxhold)
+                top3 = top_pitch_classes(chroma, k=3)
+                if chroma.max() > 0.3:
+                    names = " ".join(PITCH_CLASS_NAMES[i] for i, _ in top3)
+                    lines.append(f"  chroma top-3: {names}")
+        except Exception:
+            pass
         self.peak_label.setText("\n".join(lines))
+
+    def _update_chroma_panel(self, freqs: np.ndarray, magnitude_db: np.ndarray) -> None:
+        """Compute chroma from the max-hold buffer and refresh the bars."""
+        chroma = compute_chroma(freqs, magnitude_db)
+        self.chroma.update_chroma(chroma)
 
     # --- shutdown -------------------------------------------------------------
 

@@ -35,9 +35,17 @@ bowls, ambient/drone sounds, percussion).
   visualises it. Transport bar with Play/Pause, Stop, seekable slider, and
   time display. Mic and file sources are mutually exclusive; switching
   sources rebuilds the STFT at the new sample rate.
+- [x] **Chroma / pitch-class display** — 12-bar histogram collapses the
+  spectrum to "which notes are sounding", regardless of octave. Reads
+  from the same max-hold buffer as the peak detector, so transient noise
+  doesn't pollute it. Top-3 pitch classes are highlighted in orange and
+  also summarised in the text panel. Designed for dense polyphony
+  (orchestral, chords) where per-peak readouts become unreadable.
 - [ ] Overlapping STFT (currently one block == one window)
 - [ ] Real pitch detection: YIN, Harmonic Product Spectrum
+- [ ] Multi-F0 estimation (Klapuri iterative harmonic subtraction)
 - [ ] Spectral features on the UI: centroid, flatness, inharmonicity
+- [ ] Chord recognition on top of chroma
 - [ ] Multi-algorithm pitch confidence indicator
 
 ### Roadmap
@@ -103,6 +111,7 @@ src/phonolite/
 ├── dsp/
 │   ├── stft.py             Hann-windowed magnitude spectrum
 │   ├── peaks.py            peak find + parabolic refinement
+│   ├── chroma.py           12-bin pitch-class projection
 │   ├── pitch/
 │   │   ├── peak_fundamental.py   MVP heuristic
 │   │   ├── yin.py                (Phase 2)
@@ -115,7 +124,8 @@ src/phonolite/
     ├── main_window.py            source switching + transport
     └── widgets/
         ├── spectrum_plot.py      live + max-hold + peak markers
-        └── spectrogram_view.py   rolling waterfall
+        ├── spectrogram_view.py   rolling waterfall
+        └── chroma_view.py        12-bar pitch-class histogram
 ```
 
 ## Dependencies
