@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pyqtgraph as pg
 
-from phonolite.dsp.chroma import PITCH_CLASS_NAMES
+from audio_core.dsp.chroma import PITCH_CLASS_NAMES
 
 _BG = "#141414"
 _FG = "#d0d0d0"

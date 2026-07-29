@@ -23,5 +23,9 @@ Thumbs.db
 .ruff_cache/
 .pytest_cache/
 
+# Node / frontend
+node_modules/
+apps/web/dist/
+
 # uv lock is kept under version control by default; comment out to ignore
 # uv.lock

@@ -9,6 +9,14 @@ bowls, ambient/drone sounds, percussion).
 > name fits the team's naming style and the tool's focus on resonant,
 > sometimes inharmonic, sound sources.
 
+> **This repo hosts two projects.** Besides the Phonolite desktop app
+> documented below, it is also home to the **Music Agent Workbench** — a
+> composition-learning agent system under construction (`packages/music-core`,
+> `apps/server`, `apps/web`). See `music_agent_workbench_design.md` (Chinese)
+> for the architecture and `AGENTS.md` for the repo workflow. Phonolite's
+> algorithmic core lives in `packages/audio-core` and doubles as the
+> Workbench's future audio-analysis (MIR) backend.
+
 ## Status
 
 ### Phase 1 (MVP) — done
@@ -72,7 +80,7 @@ bowls, ambient/drone sounds, percussion).
 ## Quick start
 
 ```powershell
-uv sync                 # create venv and install deps
+uv sync --all-packages  # create venv and install all workspace members
 uv run phonolite        # launch the app
 # or: uv run python -m phonolite
 ```
@@ -115,32 +123,39 @@ heuristic for YIN / HPS.
 
 ## Project layout
 
+The repo is a uv workspace: `packages/` holds host-independent libraries,
+`apps/` holds applications (see `AGENTS.md` for the full picture).
+
 ```
-src/phonolite/
-├── audio/
-│   ├── input_stream.py     microphone capture (QSignal + sounddevice)
-│   ├── file_player.py      file playback (QSignal + soundfile + sounddevice)
-│   └── ring_buffer.py      (placeholder for Phase 2 overlap)
-├── dsp/
-│   ├── stft.py             Hann-windowed magnitude spectrum
-│   ├── peaks.py            peak find + parabolic refinement
-│   ├── chroma.py           12-bin pitch-class projection (octave-folded)
-│   ├── pitch_grid.py       MIDI-resolution projection (octave-preserving)
-│   ├── pitch/
-│   │   ├── peak_fundamental.py   MVP heuristic
-│   │   ├── yin.py                (Phase 2)
-│   │   └── hps.py                (Phase 2)
-│   ├── harmonic_fit.py     (Phase 3)
-│   └── features.py         spectral centroid / flatness (Phase 2)
-├── music/
-│   └── naming.py           freq ↔ note / cents / interval
-└── ui/
-    ├── main_window.py            source switching + transport
-    └── widgets/
-        ├── spectrum_plot.py      live + max-hold + peak markers
-        ├── spectrogram_view.py   Hz waterfall (diagnostic)
-        ├── piano_roll_view.py    MIDI waterfall (transcription)
-        └── chroma_view.py        12-bar pitch-class histogram
+packages/audio-core/            pure numpy/scipy — no Qt, no audio I/O
+└── src/audio_core/
+    ├── dsp/
+    │   ├── stft.py             Hann-windowed magnitude spectrum
+    │   ├── peaks.py            peak find + parabolic refinement
+    │   ├── chroma.py           12-bin pitch-class projection (octave-folded)
+    │   ├── pitch_grid.py       MIDI-resolution projection (octave-preserving)
+    │   ├── ring_buffer.py      (placeholder for Phase 2 overlap)
+    │   ├── pitch/
+    │   │   ├── peak_fundamental.py   MVP heuristic
+    │   │   ├── yin.py                (Phase 2)
+    │   │   └── hps.py                (Phase 2)
+    │   ├── harmonic_fit.py     (Phase 3)
+    │   └── features.py         spectral centroid / flatness (Phase 2)
+    └── music/
+        └── naming.py           freq ↔ note / cents / interval
+
+apps/phonolite/                 PySide6 desktop app (uv run phonolite)
+└── src/phonolite/
+    ├── audio/
+    │   ├── input_stream.py     microphone capture (QSignal + sounddevice)
+    │   └── file_player.py      file playback (QSignal + soundfile + sounddevice)
+    └── ui/
+        ├── main_window.py            source switching + transport
+        └── widgets/
+            ├── spectrum_plot.py      live + max-hold + peak markers
+            ├── spectrogram_view.py   Hz waterfall (diagnostic)
+            ├── piano_roll_view.py    MIDI waterfall (transcription)
+            └── chroma_view.py        12-bar pitch-class histogram
 ```
 
 ## Dependencies

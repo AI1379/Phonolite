@@ -1,7 +1,7 @@
 """Short-time Fourier transform utilities.
 
 Phase 1 uses a single-shot ``analyze()`` per audio block (no overlap).
-Phase 2 will introduce overlapping windows via :class:`audio.ring_buffer.RingBuffer`.
+Phase 2 will introduce overlapping windows via :class:`audio_core.dsp.ring_buffer.RingBuffer`.
 """
 
 from __future__ import annotations

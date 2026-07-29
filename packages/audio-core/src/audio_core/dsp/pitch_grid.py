@@ -1,6 +1,6 @@
 """MIDI-resolution pitch grid (a.k.a. log-frequency spectrogram bins).
 
-Same linear-interpolation distribution trick as :mod:`phonolite.dsp.chroma`,
+Same linear-interpolation distribution trick as :mod:`audio_core.dsp.chroma`,
 but WITHOUT the mod-12 fold — every semitone from ``midi_min`` to
 ``midi_max`` keeps its own bucket. This is the basis of the piano-roll
 waterfall view used for transcription, where octave information matters.

@@ -26,8 +26,8 @@ import pyqtgraph as pg
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 
-from phonolite.dsp.chroma import PITCH_CLASS_NAMES
-from phonolite.dsp.pitch_grid import compute_pitch_grid
+from audio_core.dsp.chroma import PITCH_CLASS_NAMES
+from audio_core.dsp.pitch_grid import compute_pitch_grid
 from phonolite.ui.widgets.spectrogram_view import _build_inferno_lut
 
 _BG = "#141414"

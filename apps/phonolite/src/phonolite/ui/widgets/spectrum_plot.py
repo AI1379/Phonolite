@@ -17,7 +17,7 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import Qt
 
-from phonolite.dsp.peaks import Peak
+from audio_core.dsp.peaks import Peak
 
 _BG = "#141414"
 _FG = "#d0d0d0"

@@ -1,35 +1,23 @@
-[project]
-name = "phonolite"
-version = "0.1.0"
-description = "Real-time microphone spectrum analysis and pitch exploration — a tuner-like tool for natural sounds"
-readme = "README.md"
-requires-python = ">=3.12,<3.13"
-license = { text = "MIT" }
-authors = [{ name = "Phonolite Project" }]
-keywords = ["audio", "fft", "pitch", "spectrum", "tuner", "dsp", "pyqt"]
-dependencies = [
-    "PySide6>=6.7",
-    "numpy>=1.26",
-    "scipy>=1.13",
-    "sounddevice>=0.4.6",
-    "soundfile>=0.12",
-    "pyqtgraph>=0.13",
+# uv workspace root — virtual (no package is built from this directory).
+#
+# Members:
+#   packages/*      shared libraries (music-core, audio-core)
+#   apps/phonolite  Qt desktop app (real-time spectrum / pitch explorer)
+#   apps/server     FastAPI application layer for the Music Agent Workbench
+# apps/web is a Node (Vite + React) project, intentionally not a uv member.
+
+[tool.uv.workspace]
+members = ["packages/*", "apps/phonolite", "apps/server"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "httpx>=0.28",  # required by fastapi.testclient
 ]
 
-[project.optional-dependencies]
-ml = [
-    # Phase 3 will add torch / onnxruntime here
+[tool.pytest.ini_options]
+testpaths = [
+    "packages/music-core/tests",
+    "packages/audio-core/tests",
+    "apps/server/tests",
 ]
-
-[project.scripts]
-phonolite = "phonolite.__main__:main"
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/phonolite"]
-
-[tool.uv]
-package = true

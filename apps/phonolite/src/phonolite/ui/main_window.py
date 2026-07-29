@@ -50,14 +50,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from audio_core.dsp.chroma import compute_chroma, top_pitch_classes
+from audio_core.dsp.peaks import Peak, detect_peaks
+from audio_core.dsp.pitch.peak_fundamental import fundamental_from_peaks
+from audio_core.dsp.pitch_grid import compute_pitch_grid, top_midi_notes
+from audio_core.dsp.stft import STFT
+from audio_core.music.naming import describe_frequency
 from phonolite.audio.file_player import AudioFilePlayer
 from phonolite.audio.input_stream import AudioInputStream
-from phonolite.dsp.chroma import compute_chroma, top_pitch_classes
-from phonolite.dsp.peaks import Peak, detect_peaks
-from phonolite.dsp.pitch.peak_fundamental import fundamental_from_peaks
-from phonolite.dsp.pitch_grid import compute_pitch_grid, top_midi_notes
-from phonolite.dsp.stft import STFT
-from phonolite.music.naming import describe_frequency
 from phonolite.ui.widgets.chroma_view import ChromaView
 from phonolite.ui.widgets.piano_roll_view import PianoRollView, midi_to_name
 from phonolite.ui.widgets.spectrogram_view import SpectrogramView
@@ -638,7 +638,7 @@ class MainWindow(QMainWindow):
         try:
             maxhold = self.spectrum.maxhold_data()
             if maxhold is not None:
-                from phonolite.dsp.chroma import PITCH_CLASS_NAMES
+                from audio_core.dsp.chroma import PITCH_CLASS_NAMES
                 chroma = compute_chroma(self.stft._freqs, maxhold)
                 top3 = top_pitch_classes(chroma, k=3)
                 if chroma.max() > 0.3:

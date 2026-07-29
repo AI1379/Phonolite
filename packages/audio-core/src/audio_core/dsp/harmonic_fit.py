@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 from typing import Optional
 
-from phonolite.dsp.peaks import Peak
+from audio_core.dsp.peaks import Peak
 
 
 @dataclass
