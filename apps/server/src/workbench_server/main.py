@@ -11,6 +11,7 @@ from __future__ import annotations
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from music_core import __version__ as music_core_version
+from typing import Any
 
 from workbench_server import __version__
 from workbench_server.envelope import envelope
@@ -19,7 +20,7 @@ app = FastAPI(title="Music Agent Workbench", version=__version__)
 
 
 @app.get("/api/health")
-def health() -> dict:
+def health() -> dict[str, Any]:
     """Liveness probe; also proves the workspace wiring (music-core import)."""
     return envelope(
         {

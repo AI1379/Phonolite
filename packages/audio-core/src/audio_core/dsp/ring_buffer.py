@@ -9,6 +9,7 @@ spectrogram waterfall is smooth.
 from __future__ import annotations
 
 import numpy as np
+from numpy.typing import NDArray
 
 
 class RingBuffer:
@@ -17,13 +18,17 @@ class RingBuffer:
     Not yet wired into the live pipeline; placeholder for Phase 2.
     """
 
-    def __init__(self, capacity: int, dtype=np.float32) -> None:
+    def __init__(
+        self,
+        capacity: int,
+        dtype: type[np.float32] | np.dtype[np.float32] = np.float32,
+    ) -> None:
         self.capacity = capacity
         self._buf = np.zeros(capacity, dtype=dtype)
         self._write = 0
         self._filled = 0
 
-    def push(self, samples: np.ndarray) -> None:
+    def push(self, samples: NDArray[np.float32]) -> None:
         n = len(samples)
         if n >= self.capacity:
             self._buf[:] = samples[-self.capacity:]
@@ -40,7 +45,7 @@ class RingBuffer:
         self._write = end
         self._filled = min(self.capacity, self._filled + n)
 
-    def latest(self, n: int) -> np.ndarray:
+    def latest(self, n: int) -> NDArray[np.float32]:
         if n > self.capacity:
             raise ValueError(f"requested {n} > capacity {self.capacity}")
         start = (self._write - n) % self.capacity

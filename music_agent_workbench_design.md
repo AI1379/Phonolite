@@ -132,6 +132,11 @@ Agent Runtime 可以替换，Music Domain Core 不依赖特定宿主内部 API�
 
 ## 4. 总体架构
 
+架构决策：Workbench 统一采用 B/S 架构，浏览器端负责 UI 与交互，FastAPI 服务端
+提供 Domain API 和 WebSocket。仓库中的 `apps/phonolite` 是冻结的历史 Qt 桌面应用，
+只接受严重缺陷修复，不再承接新功能；其中可复用的音频算法继续沉淀到无 Qt 的
+`packages/audio-core`，后续产品能力通过 Web/Server 暴露。
+
 ```text
 ┌─────────────────────────────────────────────────────┐
 │                    Music Workbench                  │

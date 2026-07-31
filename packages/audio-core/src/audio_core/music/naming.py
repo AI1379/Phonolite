@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Iterable
 
 A4_FREQ = 440.0
 A4_MIDI = 69

@@ -20,6 +20,17 @@ import uuid
 from dataclasses import dataclass, field
 
 
+type MetadataValue = (
+    str
+    | int
+    | float
+    | bool
+    | None
+    | list[MetadataValue]
+    | dict[str, MetadataValue]
+)
+
+
 def new_event_id(prefix: str) -> str:
     """Mint a stable, unique event ID, e.g. ``note_3f2a9c1d...``."""
     return f"{prefix}_{uuid.uuid4().hex}"
@@ -72,8 +83,8 @@ class ScoreDocument:
     notes: list[NoteEvent] = field(default_factory=list)
     tempos: list[TempoEvent] = field(default_factory=list)
     meters: list[MeterEvent] = field(default_factory=list)
-    markers: list[dict] = field(default_factory=list)
-    metadata: dict = field(default_factory=dict)
+    markers: list[dict[str, MetadataValue]] = field(default_factory=list)
+    metadata: dict[str, MetadataValue] = field(default_factory=dict)
 
     @property
     def duration_beats(self) -> float:

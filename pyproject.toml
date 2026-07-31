@@ -2,7 +2,7 @@
 #
 # Members:
 #   packages/*      shared libraries (music-core, audio-core)
-#   apps/phonolite  Qt desktop app (real-time spectrum / pitch explorer)
+#   apps/phonolite  frozen legacy Qt app (critical fixes only)
 #   apps/server     FastAPI application layer for the Music Agent Workbench
 # apps/web is a Node (Vite + React) project, intentionally not a uv member.
 
@@ -13,7 +13,27 @@ members = ["packages/*", "apps/phonolite", "apps/server"]
 dev = [
     "pytest>=8.3",
     "httpx>=0.28",  # required by fastapi.testclient
+    "pre-commit>=4.2",
+    "pyright>=1.1.403",
 ]
+
+[tool.pyright]
+include = ["packages", "apps/server"]
+exclude = ["**/__pycache__"]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
+reportMissingTypeStubs = "none"
+# Several runtime dependencies expose dynamic or incomplete APIs. Keep strict
+# checking for our declarations and known types without treating third-party
+# type gaps as errors that cascade through the workspace.
+reportUnknownMemberType = "none"
+reportUnknownArgumentType = "none"
+reportUnknownVariableType = "none"
+reportUnknownLambdaType = "none"
+reportPrivateUsage = "none"
+reportUnnecessaryTypeIgnoreComment = "error"
+venvPath = "."
+venv = ".venv"
 
 [tool.pytest.ini_options]
 testpaths = [

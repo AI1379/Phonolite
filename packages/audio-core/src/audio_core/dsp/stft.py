@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+from numpy.typing import NDArray
 from scipy.signal import windows
 
 DB_FLOOR = 1e-10  # magnitude floor before log, avoids log(0)
@@ -36,7 +37,10 @@ class STFT:
         self.sample_rate = sample_rate
         self.window_size = window_size
         # ``fftbins=True`` (periodic, DFT-even) is the correct choice for STFT.
-        self._window = windows.get_window(window, window_size, fftbins=True)
+        self._window: NDArray[np.float64] = np.asarray(
+            windows.get_window(window, window_size, fftbins=True),
+            dtype=np.float64,
+        )
         # Pre-compute bin frequencies for the default n_fft
         self._freqs = np.fft.rfftfreq(window_size, d=1.0 / sample_rate)
 

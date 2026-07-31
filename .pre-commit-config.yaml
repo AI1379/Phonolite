@@ -1,0 +1,9 @@
+repos:
+  - repo: local
+    hooks:
+      - id: pyright
+        name: pyright (strict workspace type check)
+        entry: uv run pyright
+        language: system
+        pass_filenames: false
+        always_run: true

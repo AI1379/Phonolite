@@ -17,6 +17,11 @@ bowls, ambient/drone sounds, percussion).
 > algorithmic core lives in `packages/audio-core` and doubles as the
 > Workbench's future audio-analysis (MIR) backend.
 
+> **Maintenance status.** The Qt desktop app is frozen and receives only
+> critical fixes. All new product work uses the browser-based Workbench
+> (`apps/web` + `apps/server`); reusable audio algorithms remain active in
+> `packages/audio-core`.
+
 ## Status
 
 ### Phase 1 (MVP) — done

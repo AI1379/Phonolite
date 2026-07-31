@@ -8,11 +8,11 @@
 一个 uv workspace，承载两个相互关联的项目：
 
 1. **Phonolite**（`apps/phonolite/` + `packages/audio-core/`）——已可用的桌面应用：
-   实时麦克风/音频文件频谱分析与音高探索（PySide6 + pyqtgraph）。状态稳定，
-   **不要破坏它**；`audio-core` 是纯算法库（numpy/scipy，无 Qt），未来会成为
-   Workbench 的音频分析（MIR）后端。
+   实时麦克风/音频文件频谱分析与音高探索（PySide6 + pyqtgraph）。Qt 应用现已
+   **冻结**：除严重缺陷外不再修改，也不新增功能。`audio-core` 是持续维护的纯算法库
+   （numpy/scipy，无 Qt），未来会成为 Workbench 的音频分析（MIR）后端。
 2. **Music Agent Workbench**（`packages/`、`apps/`）——新建项目：面向音乐创作
-   学习的 Agent 系统（Composition IDE）。
+   学习的 Agent 系统（Composition IDE），统一采用 React + FastAPI 的 B/S 架构。
 
 **架构的唯一事实来源是 `music_agent_workbench_design.md`（中文）。**
 做任何结构性决策前必须先读它；代码与设计文档冲突时，要么改代码，要么先更新
@@ -27,7 +27,7 @@ Phonolite/
 │   ├── music-core/           # 宿主无关的音乐领域核心：Score IR / io / 分析 / 变换
 │   └── audio-core/           # 音频 DSP 与音高工具（STFT/峰值/chroma/音名），未来 MIR 后端
 ├── apps/
-│   ├── phonolite/            # Phonolite Qt 桌面应用（audio 采集/回放 + ui；算法依赖 audio-core）
+│   ├── phonolite/            # 已冻结的历史 Qt 桌面应用；仅修严重缺陷
 │   ├── server/               # FastAPI 应用层（Domain API / WebSocket）
 │   └── web/                  # Workbench 前端（Vite + React + TypeScript）
 ├── music_agent_workbench_design.md   # 设计文档（架构事实来源）
@@ -38,9 +38,12 @@ Phonolite/
 
 ```powershell
 uv sync --all-packages        # 安装整个 workspace（含全部成员包与 dev 依赖）
-uv run phonolite              # 启动 Phonolite Qt 应用
+uv run phonolite              # 启动冻结的历史 Phonolite Qt 应用
 uv run workbench-server       # 启动 FastAPI（127.0.0.1:8000，带 reload）
 uv run pytest                 # 运行 workspace 全部 Python 测试
+uv run pyright                # 对整个 Python workspace 执行严格类型检查
+uv run pre-commit install     # 首次 clone 后安装 Git pre-commit hook
+uv run pre-commit run --all-files  # 手动执行与提交前相同的检查
 
 cd apps/web
 pnpm install                  # 首次安装前端依赖
@@ -56,8 +59,11 @@ pnpm build                    # 类型检查 + 构建（提交前至少跑一次
   只做参数校验、调用 music-core、返回设计文档第 8.4 节的统一 Envelope。
 - **UI** → `apps/web`。聊天框不是唯一核心，选区/版本/试听/审批才是。
 - **音频/MIR 分析** → `packages/audio-core`。保持纯 numpy/scipy、无 Qt、无音频
-  I/O，这样 server 和未来 Agent 工具都能直接复用；Qt 采集/回放代码留在
-  `apps/phonolite`。
+  I/O，这样 server 和未来 Agent 工具都能直接复用；新的采集、回放和可视化能力
+  通过 Web/Server 实现，不再扩展 `apps/phonolite`。
+- **不要向 `apps/phonolite` 添加功能**。它是冻结的历史参考实现，只允许修复导致
+  无法启动、数据损坏或核心功能不可用的严重缺陷；一般重构、类型清理和 UI 改进也
+  不应触碰它。后续产品开发默认采用 B/S 架构。
 - **不要**创建设计文档里"暂时不做"的东西：自治多 Agent、VST3、知识图谱、
   通用向量库、完整音频转录。也不要提前把 `skills/`、`adapters/` 等目录一次性
   建全——按 MVP 路线（设计文档第 16 节）用到再建。
@@ -69,10 +75,23 @@ pnpm build                    # 类型检查 + 构建（提交前至少跑一次
   依赖方用 `[tool.uv.sources] xxx = { workspace = true }` 引用。
 - 风格跟随现有代码：英文模块 docstring、`from __future__ import annotations`、
   dataclass + 类型标注、注释用英文。
+- Pyright 以根 `pyproject.toml` 中的 strict 配置为准，覆盖活跃的 packages 与
+  server（冻结的 `apps/phonolite` 不在强制类型门禁内）。所有函数参数和返回值必须
+  标注类型；禁止裸 `dict`、`list`、`tuple` 等容器类型。领域数据优先使用
+  dataclass、`TypedDict` 或明确的类型别名，不要让 `Any`/`Unknown` 穿过模块边界。
+- 对 mido 等动态或类型信息不完整的第三方库，
+  应在适配边界通过 `cast`、显式类型或运行时检查收窄。确需忽略时，只允许使用带
+  具体规则名的最小范围 `# pyright: ignore[reportXxx]`，并在旁边说明原因；禁止
+  整文件关闭 strict、无规则名的 `type: ignore` 或为了通过检查而扩大为 `Any`。
+- 类型错误可能暴露真实逻辑错误，不能视为编辑器噪声。修改代码时应检查错误根因，
+  尤其关注 Optional、容器元素、回调签名、动态库返回值和跨包 API。
 - 设计文档与中文讨论用中文；代码、docstring、commit message 用英文。
 - 测试：pytest，每个包的测试放在自己的 `tests/`（如 `packages/music-core/tests/`）；
   根 `pyproject.toml` 的 `testpaths` 需同步注册。
-- 提交前：`uv run pytest` 全绿；改了前端则 `pnpm build` 通过。
+- 提交前：`uv run pyright` 与 `uv run pytest` 必须全绿；改了前端则 `pnpm build`
+  通过。仓库的 `.pre-commit-config.yaml` 会在每次 commit 前对整个 Python
+  活跃 Python workspace 执行 Pyright；首次 clone 或 hook 更新后运行
+  `uv run pre-commit install`。
 
 ## 6. 设计红线（来自设计文档，写代码时必须遵守）
 
