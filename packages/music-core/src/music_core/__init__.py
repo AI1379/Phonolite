@@ -6,14 +6,29 @@ The architectural source of truth is ``music_agent_workbench_design.md``
 vertical slice).
 """
 
-from music_core.ir import MeterEvent, NoteEvent, ScoreDocument, TempoEvent
+from music_core.ir import (
+    MeterEvent,
+    NoteEvent,
+    Region,
+    ScoreDocument,
+    TempoEvent,
+    beat_to_bar,
+    meter_beats_per_bar,
+    new_event_id,
+    region_from_bars,
+)
 
 __version__ = "0.1.0"
 
 __all__ = [
     "MeterEvent",
     "NoteEvent",
+    "Region",
     "ScoreDocument",
     "TempoEvent",
+    "beat_to_bar",
+    "meter_beats_per_bar",
+    "new_event_id",
+    "region_from_bars",
     "__version__",
 ]

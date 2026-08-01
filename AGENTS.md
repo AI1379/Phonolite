@@ -115,5 +115,16 @@ MIDI Import → Score IR → Project Goal → Inspect → Delayed Resolution Tra
 ```
 
 在它跑通之前，不投入：完整音频转录、自治多 Agent、VST3、复杂 UI、多 DAW
-支持。优先完成设计文档第 17 节列出的前几个 issue（Score IR、MIDI round-trip、
-project.yaml、基础分析、受控变换、diff、渲染）。
+支持。
+
+**进度**：设计文档第 17 节的前 8 个 issue（Score IR、MIDI round-trip、
+project.yaml、基础分析、两种受控变换、diff、渲染）已完成，即 **MVP-0 离线音乐
+核心已就位**——见 `packages/music-core` 的 `ir.py` / `io/midi.py` / `project.py` /
+`analysis.py` / `validation.py` / `transform.py` / `diff.py` / `render.py`
+（`uv run pyright` 与 `uv run pytest` 全绿）。
+
+**下一步**：切片剩余环节（Inspect / 变换 / diff / 渲染 / A/B / 决策 / 学习事件）
+需要 MVP-1 的薄接线层：把 music-core 包成 `apps/server` 的工具接口
+（`inspect_score` / `compare_versions` / `apply_transformation` / `render_score`），
+再加极简 A/B 选择与 project 决策记录。在纵向切片端到端跑通前，不做 MVP-2
+记忆系统、DAW bridge 或复杂 UI。
