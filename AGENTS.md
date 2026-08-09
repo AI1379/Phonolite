@@ -123,8 +123,26 @@ project.yaml、基础分析、两种受控变换、diff、渲染）已完成，�
 `analysis.py` / `validation.py` / `transform.py` / `diff.py` / `render.py`
 （`uv run pyright` 与 `uv run pytest` 全绿）。
 
-**下一步**：切片剩余环节（Inspect / 变换 / diff / 渲染 / A/B / 决策 / 学习事件）
-需要 MVP-1 的薄接线层：把 music-core 包成 `apps/server` 的工具接口
-（`inspect_score` / `compare_versions` / `apply_transformation` / `render_score`），
-再加极简 A/B 选择与 project 决策记录。在纵向切片端到端跑通前，不做 MVP-2
-记忆系统、DAW bridge 或复杂 UI。
+**下一步**：MVP-2 记忆系统（Raw Event / Observation / Claim / Project State /
+Learning State / Recall Planner，设计文档第 11 节）与 Agent Runtime 适配
+（Codex 或 OpenCode，设计文档第 6 节）。在 MVP-2 之前不做 DAW bridge 或复杂 UI。
+
+**MVP-1 薄接线层已就位**：`apps/server` 把 music-core 包成 Domain API，全部走
+设计文档 8.4 的统一 Envelope。乐谱工具（设计文档 8.2）：`POST /api/score/import`
+（base64 MIDI）、`GET /api/score/{id}`、`GET /api/score/{id}/inspect`、
+`POST /api/score/compare`、`POST /api/score/transform`、`POST /api/score/{id}/render`、
+`POST /api/score/{id}/export`、`GET /api/artifact/{token}`（下载渲染/导出产物）。
+项目工具（设计文档 8.1）：`GET /api/project`、`PATCH /api/project/goal`、
+`POST /api/project/decision`、`POST /api/project/accept`、`POST /api/project/choose`
+（A/B 选择 + 决策记录的切片便捷端点，reason 作为轻量学习事件）。状态由内存
+`InMemoryProjectStore`（`store.py`）持有，是后续 SQLite 实现的可替换薄层。
+第 19 节纵向切片（Import → Goal → Inspect → Delayed Bass Transform → Diff →
+Render → A/B Choose → Decision）已由 `apps/server/tests/test_vertical_slice.py`
+端到端跑通；`uv run pyright` 与 `uv run pytest`（97 项）全绿。
+
+**MVP-1 检查 UI 已提前就位**：`apps/web` 现可直接操作并检查上述纵向切片，包括
+MIDI 导入、版本树、项目目标、可定位分析结论、受控变换、A/B semantic diff、
+渲染/导出产物下载、候选选择与决策时间线。当前采用结构化卡片/列表，不包含钢琴
+卷帘、完整谱面编辑或复杂音频工作区（这些仍属于后续 MVP-4）。联调时分别运行
+`uv run workbench-server` 与 `apps/web` 下的 `pnpm dev`，访问 Vite 打印的
+`http://localhost:5173/`；`pnpm build` 已通过。
