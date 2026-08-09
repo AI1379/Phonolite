@@ -21,6 +21,7 @@ from typing import Any
 import uvicorn
 from fastapi import FastAPI, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
+from memory_core import ExperimentOutcome, RecallPlanner, recall
 from music_core.analysis import inspect
 from music_core.diff import diff
 from music_core.io.midi import dumps_midi, loads_midi
@@ -30,20 +31,33 @@ from music_core.transform import TransformRequest, apply_transform
 
 from workbench_server import __version__
 from workbench_server.envelope import envelope
+from workbench_server.memory import MemoryRecordNotFound, get_memory_store
 from workbench_server.schemas import (
     AcceptRequest,
+    ClaimConfirmRequest,
     ChooseRequest,
     CompareRequest,
     DecisionRequest,
     GoalUpdateRequest,
     ImportRequest,
+    LearningOutcomeRequest,
+    MemoryClaimRequest,
+    MemoryEpisodeRequest,
+    MemoryQueryRequest,
     TransformRequestModel,
 )
 from workbench_server.serialization import (
+    claim_to_dict,
     decision_to_dict,
     diff_to_dict,
     finding_to_dict,
+    learning_state_to_dict,
+    memory_event_to_dict,
+    observation_to_dict,
+    outcome_projection_to_dict,
     project_config_to_dict,
+    project_state_to_dict,
+    recall_view_to_dict,
     transform_result_to_dict,
 )
 from workbench_server.store import (
@@ -81,6 +95,13 @@ async def _version_not_found_handler(  # pyright: ignore[reportUnusedFunction]  
 @app.exception_handler(ArtifactNotFound)
 async def _artifact_not_found_handler(  # pyright: ignore[reportUnusedFunction]  # registered via decorator
     _request: Request, exc: ArtifactNotFound
+) -> JSONResponse:
+    return JSONResponse(status_code=404, content=_error_envelope(str(exc)))
+
+
+@app.exception_handler(MemoryRecordNotFound)
+async def _memory_not_found_handler(  # pyright: ignore[reportUnusedFunction]  # registered via decorator
+    _request: Request, exc: MemoryRecordNotFound
 ) -> JSONResponse:
     return JSONResponse(status_code=404, content=_error_envelope(str(exc)))
 
@@ -170,6 +191,12 @@ def score_import(body: ImportRequest) -> dict[str, Any]:
     # First import becomes the active (main) version explicitly.
     if store.active_version_id() is None:
         store.accept_variant(version.version_id)
+    get_memory_store().record_project_state(
+        actor_id="system:workbench",
+        project_id=store.config.id,
+        key="active_version",
+        value=version.version_id,
+    )
     return envelope(
         {"version": version.to_dict()},
         tool="import_score",
@@ -361,6 +388,16 @@ def project_status() -> dict[str, Any]:
 def project_update_goal(body: GoalUpdateRequest) -> dict[str, Any]:
     """Set the current goal (description + optional bar/beat region)."""
     config = get_store().update_goal(body.description, body.bars, body.beats)
+    get_memory_store().record_project_state(
+        actor_id="person:user",
+        project_id=config.id,
+        key="current_goal",
+        value={
+            "description": body.description,
+            "bars": list(body.bars) if body.bars is not None else None,
+            "beats": list(body.beats) if body.beats is not None else None,
+        },
+    )
     return envelope(
         {"project": project_config_to_dict(config)},
         tool="project_update_goal",
@@ -377,6 +414,18 @@ def project_record_decision(body: DecisionRequest) -> dict[str, Any]:
         reason=body.reason,
         tags=tuple(body.tags),
     )
+    get_memory_store().record_project_state(
+        actor_id="person:user",
+        project_id=config.id,
+        key="last_decision",
+        value={
+            "id": decision.id,
+            "summary": decision.summary,
+            "chosen_version_id": decision.chosen_version_id,
+            "reason": decision.reason,
+            "tags": list(decision.tags),
+        },
+    )
     return envelope(
         {"decision": decision_to_dict(decision), "project": project_config_to_dict(config)},
         tool="project_record_decision",
@@ -388,6 +437,12 @@ def project_record_decision(body: DecisionRequest) -> dict[str, Any]:
 def project_accept_variant(body: AcceptRequest) -> dict[str, Any]:
     """Promote a variant to the active version (never silent; explicit accept)."""
     config = get_store().accept_variant(body.version_id)
+    get_memory_store().record_project_state(
+        actor_id="person:user",
+        project_id=config.id,
+        key="active_version",
+        value=body.version_id,
+    )
     return envelope(
         {"project": project_config_to_dict(config), "active_version": body.version_id},
         tool="project_accept_variant",
@@ -414,10 +469,156 @@ def project_choose(body: ChooseRequest) -> dict[str, Any]:
         tags=tuple(body.tags),
     )
     config = store.accept_variant(body.chosen_version_id)
+    projection = get_memory_store().record_experiment_outcome(
+        ExperimentOutcome(
+            project_id=config.id,
+            subject_id=body.subject_id,
+            experiment_id=body.experiment_id or decision.id,
+            chosen_version_id=body.chosen_version_id,
+            reason=body.reason,
+            learning_focus=body.learning_focus,
+            tags=tuple(body.tags),
+        )
+    )
     return envelope(
-        {"decision": decision_to_dict(decision), "project": project_config_to_dict(config)},
+        {
+            "decision": decision_to_dict(decision),
+            "project": project_config_to_dict(config),
+            "memory_projection": outcome_projection_to_dict(projection),
+        },
         tool="project_choose",
         inputs=[body.chosen_version_id],
+        version=__version__,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Memory and learning tools (design doc sections 8.3 and 11)
+# --------------------------------------------------------------------------- #
+
+
+@app.post("/api/memory/episodes")
+def memory_record_episode(body: MemoryEpisodeRequest) -> dict[str, Any]:
+    """Append an episode and expose its low-inference observation."""
+    store = get_memory_store()
+    event = store.record_episode(
+        actor_id=body.actor_id,
+        project_id=body.project_id,
+        summary=body.summary,
+        details=body.details,
+    )
+    observation = store.get_observation(f"observation:{event.id}")
+    return envelope(
+        {
+            "event": memory_event_to_dict(event),
+            "observation": observation_to_dict(observation),
+        },
+        tool="memory_record_episode",
+        inputs=[body.project_id] if body.project_id else [],
+        version=__version__,
+    )
+
+
+@app.post("/api/memory/claims")
+def memory_propose_claim(body: MemoryClaimRequest) -> dict[str, Any]:
+    """Create a proposal with evidence and a fail-closed policy."""
+    store = get_memory_store()
+    claim = store.propose_claim(
+        actor_id=body.actor_id,
+        project_id=body.project_id,
+        subject_type=body.subject_type,
+        subject_id=body.subject_id,
+        predicate=body.predicate,
+        value=body.value,
+        claim_type=body.claim_type,
+        context_type=body.context_type,
+        context_id=body.context_id,
+        tags=tuple(body.tags),
+        confidence=body.confidence,
+        excerpt=body.excerpt,
+        sensitivity=body.sensitivity,
+        visibility=body.visibility,
+        allowed_contexts=tuple(body.allowed_contexts),
+    )
+    return envelope(
+        claim_to_dict(*store.get_claim(claim.id)),
+        tool="memory_propose_claim",
+        inputs=[body.project_id] if body.project_id else [],
+        version=__version__,
+    )
+
+
+@app.post("/api/memory/claims/{claim_id}/confirm")
+def memory_confirm_claim(
+    claim_id: str, body: ClaimConfirmRequest
+) -> dict[str, Any]:
+    """Confirm a proposal only after an explicit user-facing command."""
+    store = get_memory_store()
+    try:
+        store.confirm_claim(claim_id, actor_id=body.actor_id)
+        result = store.get_claim(claim_id)
+    except KeyError as exc:
+        raise MemoryRecordNotFound(claim_id) from exc
+    return envelope(
+        claim_to_dict(*result),
+        tool="memory_confirm_claim",
+        inputs=[claim_id],
+        version=__version__,
+    )
+
+
+@app.post("/api/memory/query")
+def memory_query(body: MemoryQueryRequest) -> dict[str, Any]:
+    """Plan channel-specific recall and return a ranked recall view."""
+    plan = RecallPlanner().plan(
+        project_id=body.project_id,
+        subject_id=body.subject_id,
+        need_raw_history=body.need_raw_history,
+        time_horizon=body.time_horizon,
+        per_channel_limit=body.per_channel_limit,
+    )
+    view = recall(get_memory_store(), plan, query=body.query)
+    return envelope(
+        recall_view_to_dict(view),
+        tool="memory_query",
+        inputs=[value for value in (body.project_id, body.subject_id) if value],
+        version=__version__,
+    )
+
+
+@app.post("/api/learning/outcomes")
+def learning_record_outcome(body: LearningOutcomeRequest) -> dict[str, Any]:
+    """Record an explicit learning event and update current learning state."""
+    state = get_memory_store().record_learning_outcome(
+        actor_id=body.actor_id,
+        subject_id=body.subject_id,
+        project_id=body.project_id,
+        focus=body.focus,
+        status=body.status,
+        mastery=body.mastery,
+        evidence=body.evidence,
+    )
+    return envelope(
+        {"learning_state": learning_state_to_dict(state)},
+        tool="learning_record_outcome",
+        inputs=[body.project_id] if body.project_id else [],
+        version=__version__,
+    )
+
+
+@app.get("/api/memory/project/{project_id}")
+def memory_project_state(project_id: str) -> dict[str, Any]:
+    """Inspect explicit project and learning projections without raw history."""
+    store = get_memory_store()
+    return envelope(
+        {
+            "project_state": [
+                project_state_to_dict(item) for item in store.list_project_state(project_id)
+            ],
+            "projection_counts": store.projection_counts(),
+        },
+        tool="memory_project_state",
+        inputs=[project_id],
         version=__version__,
     )
 

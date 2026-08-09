@@ -25,6 +25,7 @@ Phonolite/
 ├── pyproject.toml            # uv workspace 虚拟根（members + dev 依赖 + pytest 配置）
 ├── packages/
 │   ├── music-core/           # 宿主无关的音乐领域核心：Score IR / io / 分析 / 变换
+│   ├── memory-core/          # 宿主无关的事件溯源记忆、学习状态与 Recall Planner
 │   └── audio-core/           # 音频 DSP 与音高工具（STFT/峰值/chroma/音名），未来 MIR 后端
 ├── apps/
 │   ├── phonolite/            # 已冻结的历史 Qt 桌面应用；仅修严重缺陷
@@ -56,7 +57,10 @@ pnpm build                    # 类型检查 + 构建（提交前至少跑一次
 - **音乐领域逻辑**（Score IR、分析、变换、校验、渲染）→ `packages/music-core`。
   它不依赖任何 Agent 宿主、Web 框架或 UI，保持纯 Python、可单测。
 - **HTTP/WebSocket 接口、会话、任务路由** → `apps/server`。保持薄层：
-  只做参数校验、调用 music-core、返回设计文档第 8.4 节的统一 Envelope。
+  只做参数校验、调用 music-core / memory-core、返回设计文档第 8.4 节的统一 Envelope。
+- **记忆与学习状态** → `packages/memory-core`。Raw Event 只追加，Observation、Claim、
+  Project State、Learning State 都是可 replay 的 SQLite 投影；召回先由 Recall Planner
+  分通道规划。长期偏好必须显式确认，未知 sensitivity 必须 fail-closed。
 - **UI** → `apps/web`。聊天框不是唯一核心，选区/版本/试听/审批才是。
 - **音频/MIR 分析** → `packages/audio-core`。保持纯 numpy/scipy、无 Qt、无音频
   I/O，这样 server 和未来 Agent 工具都能直接复用；新的采集、回放和可视化能力
@@ -123,9 +127,12 @@ project.yaml、基础分析、两种受控变换、diff、渲染）已完成，�
 `analysis.py` / `validation.py` / `transform.py` / `diff.py` / `render.py`
 （`uv run pyright` 与 `uv run pytest` 全绿）。
 
-**下一步**：MVP-2 记忆系统（Raw Event / Observation / Claim / Project State /
-Learning State / Recall Planner，设计文档第 11 节）与 Agent Runtime 适配
-（Codex 或 OpenCode，设计文档第 6 节）。在 MVP-2 之前不做 DAW bridge 或复杂 UI。
+设计文档的正式路线为 **MVP-0 到 MVP-5，共 6 个阶段**；第 19 节纵向切片是步骤链，
+不是额外的 MVP 阶段。
+
+**下一步**：补齐 MVP-1 遗留的 Agent Runtime 抽象及 Codex/OpenCode 中至少一个实际
+Adapter（设计文档第 6 节），再进入 MVP-3 FL Studio Bridge。此时仍不做自治多 Agent、
+VST3、完整音频转录或复杂 MVP-4 UI。
 
 **MVP-1 薄接线层已就位**：`apps/server` 把 music-core 包成 Domain API，全部走
 设计文档 8.4 的统一 Envelope。乐谱工具（设计文档 8.2）：`POST /api/score/import`
@@ -138,7 +145,7 @@ Learning State / Recall Planner，设计文档第 11 节）与 Agent Runtime 适
 `InMemoryProjectStore`（`store.py`）持有，是后续 SQLite 实现的可替换薄层。
 第 19 节纵向切片（Import → Goal → Inspect → Delayed Bass Transform → Diff →
 Render → A/B Choose → Decision）已由 `apps/server/tests/test_vertical_slice.py`
-端到端跑通；`uv run pyright` 与 `uv run pytest`（97 项）全绿。
+端到端跑通；当前 `uv run pyright` 与 `uv run pytest`（含 MVP-2 共 111 项）全绿。
 
 **MVP-1 检查 UI 已提前就位**：`apps/web` 现可直接操作并检查上述纵向切片，包括
 MIDI 导入、版本树、项目目标、可定位分析结论、受控变换、A/B semantic diff、
@@ -146,3 +153,12 @@ MIDI 导入、版本树、项目目标、可定位分析结论、受控变换、
 卷帘、完整谱面编辑或复杂音频工作区（这些仍属于后续 MVP-4）。联调时分别运行
 `uv run workbench-server` 与 `apps/web` 下的 `pnpm dev`，访问 Vite 打印的
 `http://localhost:5173/`；`pnpm build` 已通过。
+
+**MVP-2 记忆与学习状态已就位**：新增 `packages/memory-core`，以 SQLite `project.db`
+保存不可变 Raw Event，并确定性投影 Observation、固定粗类型 Claim + Evidence/State/
+Policy、Project State 与 Learning State。Recall Planner 按用户偏好、当前项目、近期项目
+情节、学习状态独立检索和限额，默认不读取 Raw Event；未知 sensitivity 会进入 private
+quarantine。A/B `choose` 会投影显式项目决策、项目状态、偏好 proposal（不会因一次选择
+自动确认）和学习状态。Server 已提供 `memory_query` / `memory_propose_claim` /
+`memory_confirm_claim` / `memory_record_episode` / `learning_record_outcome` 对应 API，
+`packages/memory-core/tests/test_replay.py` 验证全部派生表可从事件账本重建。

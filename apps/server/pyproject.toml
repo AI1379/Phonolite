@@ -9,6 +9,7 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "music-core",
+    "memory-core",
 ]
 
 [project.scripts]
@@ -23,3 +24,4 @@ packages = ["src/workbench_server"]
 
 [tool.uv.sources]
 music-core = { workspace = true }
+memory-core = { workspace = true }

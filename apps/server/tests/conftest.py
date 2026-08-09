@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 from collections.abc import Callable, Iterator
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,13 +13,15 @@ from music_core.ir import MeterEvent, NoteEvent, ScoreDocument
 from music_core.io.midi import dumps_midi
 
 from workbench_server.main import app
+from workbench_server.memory import configure_memory_store
 from workbench_server.store import get_store
 
 
 @pytest.fixture
-def client() -> Iterator[TestClient]:
-    """A test client backed by a freshly reset in-memory store."""
+def client(tmp_path: Path) -> Iterator[TestClient]:
+    """A test client backed by isolated project and persistent-memory stores."""
     get_store().reset()
+    configure_memory_store(tmp_path / "project.db")
     with TestClient(app) as test_client:
         yield test_client
 

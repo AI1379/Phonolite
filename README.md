@@ -22,6 +22,13 @@ bowls, ambient/drone sounds, percussion).
 > (`apps/web` + `apps/server`); reusable audio algorithms remain active in
 > `packages/audio-core`.
 
+The Workbench has completed its offline music core, browser/server vertical
+slice, and the MVP-2 event-sourced memory layer. `packages/memory-core` keeps
+immutable raw events in SQLite and rebuildable Observation, Claim, Project
+State, Learning State, and channel-aware Recall projections. The next
+Workbench milestone is the host-independent Agent Runtime adapter; the Qt
+application remains frozen.
+
 ## Status
 
 ### Phase 1 (MVP) — done

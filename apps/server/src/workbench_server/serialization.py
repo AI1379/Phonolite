@@ -14,6 +14,18 @@ from typing import Any, cast
 
 import yaml
 
+from memory_core import (
+    ClaimState,
+    LearningState,
+    MemoryClaim,
+    MemoryEvent,
+    MemoryPolicy,
+    Observation,
+    OutcomeProjection,
+    ProjectStateEntry,
+    RecallPlan,
+    RecallView,
+)
 from music_core.analysis import Evidence, Finding, Location
 from music_core.diff import NoteChange, ScoreDiff
 from music_core.ir import (
@@ -205,3 +217,120 @@ def project_config_to_dict(config: ProjectConfig) -> dict[str, object]:
     if not isinstance(data, dict):
         raise ValueError("project config did not serialise to a mapping")
     return cast(dict[str, object], data)
+
+
+def memory_event_to_dict(event: MemoryEvent) -> dict[str, object]:
+    return {
+        "id": event.id,
+        "event_type": event.event_type,
+        "actor_id": event.actor_id,
+        "project_id": event.project_id,
+        "payload": event.payload,
+        "occurred_at": event.occurred_at,
+    }
+
+
+def observation_to_dict(observation: Observation) -> dict[str, object]:
+    return {
+        "id": observation.id,
+        "source_event_id": observation.source_event_id,
+        "subject": observation.subject,
+        "event": observation.event,
+        "context": observation.context,
+        "confidence": observation.confidence,
+        "observed_at": observation.observed_at,
+        "project_id": observation.project_id,
+    }
+
+
+def claim_to_dict(
+    claim: MemoryClaim, state: ClaimState, policy: MemoryPolicy
+) -> dict[str, object]:
+    return {
+        "claim": {
+            "id": claim.id,
+            "subject_type": claim.subject_type,
+            "subject_id": claim.subject_id,
+            "predicate": claim.predicate,
+            "value": claim.value,
+            "context_type": claim.context_type,
+            "context_id": claim.context_id,
+            "claim_type": claim.claim_type.value,
+            "tags": list(claim.tags),
+        },
+        "state": {
+            "status": state.status.value,
+            "confidence": state.confidence,
+            "valid_from": state.valid_from,
+            "valid_until": state.valid_until,
+            "superseded_by": state.superseded_by,
+            "last_confirmed_at": state.last_confirmed_at,
+        },
+        "policy": {
+            "owner_id": policy.owner_id,
+            "visibility": policy.visibility,
+            "sensitivity": policy.sensitivity.value,
+            "allowed_contexts": list(policy.allowed_contexts),
+        },
+    }
+
+
+def project_state_to_dict(state: ProjectStateEntry) -> dict[str, object]:
+    return {
+        "project_id": state.project_id,
+        "key": state.key,
+        "value": state.value,
+        "source_event_id": state.source_event_id,
+        "updated_at": state.updated_at,
+    }
+
+
+def learning_state_to_dict(state: LearningState) -> dict[str, object]:
+    return {
+        "subject_id": state.subject_id,
+        "project_id": state.project_id,
+        "focus": state.focus,
+        "status": state.status,
+        "mastery": state.mastery,
+        "evidence_count": state.evidence_count,
+        "source_event_id": state.source_event_id,
+        "updated_at": state.updated_at,
+    }
+
+
+def recall_plan_to_dict(plan: RecallPlan) -> dict[str, object]:
+    return {
+        "channels": list(plan.channels),
+        "entities": list(plan.entities),
+        "time_horizon": plan.time_horizon,
+        "need_raw_history": plan.need_raw_history,
+        "channel_limits": dict(plan.channel_limits),
+    }
+
+
+def recall_view_to_dict(view: RecallView) -> dict[str, object]:
+    return {
+        "plan": recall_plan_to_dict(view.plan),
+        "items": [
+            {
+                "channel": item.channel,
+                "kind": item.kind,
+                "id": item.id,
+                "summary": item.summary,
+                "confidence": item.confidence,
+                "occurred_at": item.occurred_at,
+                "data": item.data,
+            }
+            for item in view.items
+        ],
+    }
+
+
+def outcome_projection_to_dict(projection: OutcomeProjection) -> dict[str, object]:
+    return {
+        "event": memory_event_to_dict(projection.event),
+        "observation_id": projection.observation_id,
+        "decision_claim_id": projection.decision_claim_id,
+        "preference_claim_id": projection.preference_claim_id,
+        "learning_focus": projection.learning_focus,
+    }

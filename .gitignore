@@ -27,5 +27,10 @@ Thumbs.db
 node_modules/
 apps/web/dist/
 
+# Local Workbench state (override with WORKBENCH_DB_PATH)
+project.db
+project.db-shm
+project.db-wal
+
 # uv lock is kept under version control by default; comment out to ignore
 # uv.lock

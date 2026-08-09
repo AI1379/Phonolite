@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from memory_core import ClaimType, JsonValue
 from music_core.ir import Region
 
 
@@ -91,3 +92,64 @@ class ChooseRequest(BaseModel):
     chosen_version_id: str
     reason: str | None = None
     tags: list[str] = Field(default_factory=list)
+    experiment_id: str | None = None
+    subject_id: str = "user"
+    learning_focus: str | None = None
+
+
+class MemoryEpisodeRequest(BaseModel):
+    """Record an immutable episode and its low-inference observation."""
+
+    actor_id: str = "person:user"
+    project_id: str | None = None
+    summary: str
+    details: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class MemoryClaimRequest(BaseModel):
+    """Propose a typed claim; proposals are never implicitly confirmed."""
+
+    actor_id: str = "person:user"
+    project_id: str | None = None
+    subject_type: str
+    subject_id: str
+    predicate: str
+    value: dict[str, JsonValue]
+    claim_type: ClaimType
+    context_type: str | None = None
+    context_id: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    excerpt: str | None = None
+    sensitivity: str = "private"
+    visibility: str = "private"
+    allowed_contexts: list[str] = Field(default_factory=list)
+
+
+class ClaimConfirmRequest(BaseModel):
+    """Explicit approval required to promote a claim to confirmed."""
+
+    actor_id: str = "person:user"
+
+
+class MemoryQueryRequest(BaseModel):
+    """Inputs for Recall Planner and channel-aware memory retrieval."""
+
+    query: str = ""
+    project_id: str | None = None
+    subject_id: str | None = "user"
+    need_raw_history: bool = False
+    time_horizon: str = "long"
+    per_channel_limit: int = Field(default=5, ge=1, le=50)
+
+
+class LearningOutcomeRequest(BaseModel):
+    """Record evidence-backed learning state explicitly."""
+
+    actor_id: str = "person:user"
+    subject_id: str = "user"
+    project_id: str | None = None
+    focus: str
+    status: str
+    mastery: float = Field(ge=0.0, le=1.0)
+    evidence: str | None = None

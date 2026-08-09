@@ -38,6 +38,7 @@ venv = ".venv"
 [tool.pytest.ini_options]
 testpaths = [
     "packages/music-core/tests",
+    "packages/memory-core/tests",
     "packages/audio-core/tests",
     "apps/server/tests",
 ]
