@@ -106,7 +106,11 @@ def validate_region(
                     )
 
     # Keyboard hand-span: within each simultaneous cluster, flag wide spans.
-    _flag_wide_spans(notes, report)
+    by_part: dict[tuple[str, str | None], list[NoteEvent]] = {}
+    for note in notes:
+        by_part.setdefault((note.track_id, note.voice_id), []).append(note)
+    for part in by_part.values():
+        _flag_wide_spans(part, report)
     return report
 
 
@@ -118,14 +122,14 @@ def _flag_wide_spans(notes: list[NoteEvent], report: ValidationReport) -> None:
         end = note.offset_beats if note.duration_beats > 0.0 else note.onset_beats
         if end <= note.onset_beats:
             continue
-        events.append((note.onset_beats, 0, note))
-        events.append((end, 1, note))
+        events.append((note.onset_beats, 1, note))
+        events.append((end, 0, note))
     events.sort(key=lambda e: (e[0], e[1]))
     active: set[int] = set()
     active_notes: dict[int, NoteEvent] = {}
     for _, kind, note in events:
         nid = id(note)
-        if kind == 0:
+        if kind == 1:
             active.add(nid)
             active_notes[nid] = note
             if len(active) >= 2:

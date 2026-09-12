@@ -1,8 +1,9 @@
+import { useProjectApi } from "./ProjectApiContext";
 // MIDI import: read a .mid file, base64-encode it, POST to /api/score/import.
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 
-import { api, ApiError } from "../api";
+import { ApiError } from "../api";
 import { Button } from "./common";
 
 function fileToBase64(file: File): Promise<string> {
@@ -22,18 +23,20 @@ export function ImportBar({
   onImported,
   onError,
 }: {
-  onImported: () => void;
+  onImported: (versionId: string) => void;
   onError: (message: string) => void;
 }) {
+  const api = useProjectApi();
   const [busy, setBusy] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   async function handleFile(file: File) {
     setBusy(true);
     try {
       const midiB64 = await fileToBase64(file);
       const title = file.name.replace(/\.midi?$/i, "");
-      await api.importMidi(midiB64, { title });
-      onImported();
+      const result = await api.importMidi(midiB64, { title });
+      onImported(result.result.version.version_id);
     } catch (err) {
       onError(err instanceof ApiError ? err.message : String(err));
     } finally {
@@ -42,8 +45,9 @@ export function ImportBar({
   }
 
   return (
-    <label className="import-bar">
+    <div className="import-bar">
       <input
+        ref={inputRef}
         type="file"
         accept=".mid,.midi,audio/midi"
         disabled={busy}
@@ -53,9 +57,9 @@ export function ImportBar({
           event.currentTarget.value = "";
         }}
       />
-      <Button variant="primary" disabled={busy}>
-        {busy ? "导入中…" : "选择 MIDI 导入"}
+      <Button variant="primary" disabled={busy} onClick={() => inputRef.current?.click()}>
+        {busy ? "导入中…" : "将 MIDI 加入本项目"}
       </Button>
-    </label>
+    </div>
   );
 }

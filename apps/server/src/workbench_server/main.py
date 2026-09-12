@@ -14,26 +14,42 @@ Run with::
 
 from __future__ import annotations
 
+import asyncio
+import os
+import re
+from urllib.parse import quote
 import tempfile
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+from starlette.middleware.base import RequestResponseEndpoint
 from memory_core import ExperimentOutcome, RecallPlanner, recall
 from music_core.analysis import inspect
 from music_core.diff import diff
 from music_core.io.midi import dumps_midi, loads_midi
-from music_core.ir import Region
+from music_core.ir import Region, ScoreDocument
 from music_core.render import RenderError, render_score
 from music_core.transform import TransformRequest, apply_transform
 
 from workbench_server import __version__
+from workbench_server.agent import (
+    AgentTaskEvent,
+    AgentTaskNotFound,
+    get_agent_manager,
+    shutdown_agent_manager,
+)
 from workbench_server.envelope import envelope
 from workbench_server.memory import MemoryRecordNotFound, get_memory_store
 from workbench_server.schemas import (
     AcceptRequest,
+    AgentResumeRequest,
+    AgentTaskRequest,
     ClaimConfirmRequest,
     ChooseRequest,
     CompareRequest,
@@ -51,6 +67,7 @@ from workbench_server.serialization import (
     decision_to_dict,
     diff_to_dict,
     finding_to_dict,
+    note_to_dict,
     learning_state_to_dict,
     memory_event_to_dict,
     observation_to_dict,
@@ -65,9 +82,52 @@ from workbench_server.store import (
     VersionNotFound,
     decode_midi_b64,
     get_store,
+    close_project_store,
+    get_workspace_store,
+    project_scope,
+    request_project_id,
+    ProjectNotFound,
 )
+from workbench_server.transcription import router as transcription_router
+from workbench_server.projects import router as projects_router
 
-app = FastAPI(title="Music Agent Workbench", version=__version__)
+@asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
+    yield
+    await shutdown_agent_manager()
+    close_project_store()
+
+
+app = FastAPI(title="Music Agent Workbench", version=__version__, lifespan=_lifespan)
+app.include_router(transcription_router)
+app.include_router(projects_router)
+
+
+@app.middleware("http")
+async def bind_request_project(request: Request, call_next: RequestResponseEndpoint) -> Response:
+    """Capture project once, before a slow import/render or concurrent UI switch."""
+    header = request.headers.get("x-workbench-project")
+    query = request.query_params.get("project_id")
+    if header and query and header != query:
+        return JSONResponse(status_code=422, content=_error_envelope("conflicting project selectors"))
+    workspace = get_workspace_store()
+    project_id = header or query or workspace.active_project_id()
+    if project_id is not None:
+        try:
+            workspace.project_config(project_id)
+        except ProjectNotFound as exc:
+            return JSONResponse(status_code=404, content=_error_envelope(str(exc)))
+    with project_scope(project_id):
+        return await call_next(request)
+
+
+@app.exception_handler(RequestValidationError)
+async def _request_validation_error_handler(  # pyright: ignore[reportUnusedFunction]  # registered via decorator
+    _request: Request, exc: RequestValidationError,
+) -> JSONResponse:
+    message = "; ".join(f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
+                        for error in exc.errors())
+    return JSONResponse(status_code=422, content=_error_envelope(message))
 
 
 # --------------------------------------------------------------------------- #
@@ -92,6 +152,13 @@ async def _version_not_found_handler(  # pyright: ignore[reportUnusedFunction]  
     return JSONResponse(status_code=404, content=_error_envelope(str(exc)))
 
 
+@app.exception_handler(ProjectNotFound)
+async def _project_not_found_handler(  # pyright: ignore[reportUnusedFunction]  # registered via decorator
+    _request: Request, exc: ProjectNotFound,
+) -> JSONResponse:
+    return JSONResponse(status_code=404, content=_error_envelope(str(exc)))
+
+
 @app.exception_handler(ArtifactNotFound)
 async def _artifact_not_found_handler(  # pyright: ignore[reportUnusedFunction]  # registered via decorator
     _request: Request, exc: ArtifactNotFound
@@ -102,6 +169,13 @@ async def _artifact_not_found_handler(  # pyright: ignore[reportUnusedFunction] 
 @app.exception_handler(MemoryRecordNotFound)
 async def _memory_not_found_handler(  # pyright: ignore[reportUnusedFunction]  # registered via decorator
     _request: Request, exc: MemoryRecordNotFound
+) -> JSONResponse:
+    return JSONResponse(status_code=404, content=_error_envelope(str(exc)))
+
+
+@app.exception_handler(AgentTaskNotFound)
+async def _agent_task_not_found_handler(  # pyright: ignore[reportUnusedFunction]  # registered via decorator
+    _request: Request, exc: AgentTaskNotFound
 ) -> JSONResponse:
     return JSONResponse(status_code=404, content=_error_envelope(str(exc)))
 
@@ -145,20 +219,125 @@ def health() -> dict[str, Any]:
 
 @app.websocket("/ws")
 async def events(websocket: WebSocket) -> None:
-    """Event channel placeholder: greets, then echoes until disconnect.
-
-    Later this streams agent/runtime events (design doc section 6.2).
-    """
+    """Stream retained and live runtime events for ``?task_id=...`` subscribers."""
     await websocket.accept()
+    task_id = websocket.query_params.get("task_id")
     await websocket.send_json(
-        {"type": "hello", "payload": {"service": "workbench-server", "version": __version__}}
+        {
+            "type": "hello",
+            "payload": {
+                "service": "workbench-server",
+                "version": __version__,
+                "task_id": task_id,
+            },
+        }
     )
+    if task_id is None:
+        try:
+            while True:
+                message = await websocket.receive_text()
+                await websocket.send_json({"type": "echo", "payload": message})
+        except WebSocketDisconnect:
+            pass
+        return
+    manager = get_agent_manager()
+    queue: asyncio.Queue[AgentTaskEvent] | None = None
     try:
-        while True:
-            message = await websocket.receive_text()
-            await websocket.send_json({"type": "echo", "payload": message})
+        record = await manager.get(task_id)
+        project_id = websocket.query_params.get("project_id") or get_workspace_store().active_project_id()
+        if record.project_id is not None and record.project_id != project_id:
+            raise AgentTaskNotFound(task_id)
+        history, queue, terminal = await manager.subscribe(task_id)
+        for event in history:
+            await websocket.send_json(event.to_dict())
+        while not terminal:
+            event = await queue.get()
+            await websocket.send_json(event.to_dict())
+            terminal = event.type in {
+                "runtime.completed",
+                "runtime.cancelled",
+                "runtime.error",
+            }
+    except AgentTaskNotFound as exc:
+        await websocket.send_json(
+            {"type": "runtime.error", "payload": {"message": str(exc)}}
+        )
+        await websocket.close(code=1008)
     except WebSocketDisconnect:
         pass
+    finally:
+        if queue is not None:
+            await manager.unsubscribe(task_id, queue)
+
+
+# --------------------------------------------------------------------------- #
+# Agent runtime tasks (design doc sections 6 and 9)
+# --------------------------------------------------------------------------- #
+
+
+@app.post("/api/agent/tasks", status_code=202)
+async def agent_task_create(body: AgentTaskRequest) -> dict[str, Any]:
+    """Delegate a new Analyze, Learn, or Experiment task to OpenCode."""
+    record = await get_agent_manager().create(
+        prompt=body.prompt, mode=body.mode, session_id=body.session_id, project_id=get_store().config.id
+    )
+    return envelope(
+        {"task": record.to_dict()},
+        tool="agent_task_create",
+        inputs=[record.task_id],
+        version=__version__,
+    )
+
+
+@app.get("/api/agent/tasks/{task_id}")
+async def agent_task_get(task_id: str) -> dict[str, Any]:
+    """Return retained status and events for an agent task."""
+    record = await get_agent_manager().get(task_id)
+    if record.project_id is not None and record.project_id != get_store().config.id:
+        raise AgentTaskNotFound(task_id)
+    return envelope(
+        {"task": record.to_dict()},
+        tool="agent_task_get",
+        inputs=[task_id],
+        version=__version__,
+    )
+
+
+@app.get("/api/agent/tasks")
+async def agent_latest_task() -> dict[str, object]:
+    record = await get_agent_manager().latest(get_store().config.id)
+    return envelope({"task": record.to_dict() if record is not None else None}, tool="agent_latest_task")
+
+
+@app.post("/api/agent/tasks/{task_id}/cancel")
+async def agent_task_cancel(task_id: str) -> dict[str, Any]:
+    """Cancel a running OpenCode subprocess without deleting retained events."""
+    record = await get_agent_manager().get(task_id)
+    if record.project_id is not None and record.project_id != get_store().config.id:
+        raise AgentTaskNotFound(task_id)
+    record = await get_agent_manager().cancel(task_id)
+    return envelope(
+        {"task": record.to_dict()},
+        tool="agent_task_cancel",
+        inputs=[task_id],
+        version=__version__,
+    )
+
+
+@app.post("/api/agent/sessions/{session_id}/resume", status_code=202)
+async def agent_session_resume(
+    session_id: str, body: AgentResumeRequest
+) -> dict[str, Any]:
+    """Continue an OpenCode session as a new observable Workbench task."""
+    record = await get_agent_manager().create(
+        prompt=body.prompt, mode=body.mode, session_id=session_id, project_id=get_store().config.id
+    )
+    return envelope(
+        {"task": record.to_dict()},
+        tool="agent_session_resume",
+        inputs=[session_id, record.task_id],
+        version=__version__,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -191,11 +370,12 @@ def score_import(body: ImportRequest) -> dict[str, Any]:
     # First import becomes the active (main) version explicitly.
     if store.active_version_id() is None:
         store.accept_variant(version.version_id)
+    store.set_working_version(version.version_id)
     get_memory_store().record_project_state(
         actor_id="system:workbench",
         project_id=store.config.id,
         key="active_version",
-        value=version.version_id,
+        value=store.active_version_id(),
     )
     return envelope(
         {"version": version.to_dict()},
@@ -206,11 +386,24 @@ def score_import(body: ImportRequest) -> dict[str, Any]:
 
 
 @app.get("/api/score/{version_id}")
-def score_get(version_id: str) -> dict[str, Any]:
-    """Return a version's summary (no per-note listing; use export for that)."""
+def score_get(
+    version_id: str,
+    start_beat: float | None = Query(default=None),
+    end_beat: float | None = Query(default=None),
+    track_ids: str | None = Query(default=None),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=256, ge=1, le=1024),
+) -> dict[str, Any]:
+    """Return summary and a bounded note page for evidence-based inspection."""
     version = get_store().get_version(version_id)
+    region = _score_region(version.document, start_beat, end_beat, track_ids)
+    notes = version.document.select_region(region) if region else sorted(
+        version.document.notes, key=lambda note: (note.onset_beats, note.track_id, note.pitch)
+    )
     return envelope(
-        {"version": version.to_dict()},
+        {"version": version.to_dict(), "notes": [note_to_dict(note) for note in notes[offset:offset + limit]],
+         "total_notes": len(notes), "offset": offset,
+         "next_offset": offset + limit if offset + limit < len(notes) else None},
         tool="get_score",
         inputs=[version_id],
         version=__version__,
@@ -226,12 +419,7 @@ def score_inspect(
 ) -> dict[str, Any]:
     """Run stage-1 analyses (register, density, bass contour) over a region."""
     document = get_store().get_version(version_id).document
-    region: Region | None = None
-    if start_beat is not None and end_beat is not None:
-        tids = tuple(track_ids.split(",")) if track_ids else None
-        region = Region(start_beat=start_beat, end_beat=end_beat, track_ids=tids)
-    elif start_beat is not None or end_beat is not None:
-        raise ValueError("inspect region requires both start_beat and end_beat")
+    region = _score_region(document, start_beat, end_beat, track_ids)
     findings = inspect(document, region)
     return envelope(
         {
@@ -298,8 +486,9 @@ def score_render(
     """Render a version to audio (or MIDI fallback) and store it as an artifact."""
     document = get_store().get_version(version_id).document
     with tempfile.TemporaryDirectory(prefix="workbench-render-") as tmp:
-        out_path = Path(tmp) / f"{version_id}.out"
-        result = render_score(document, out_path, backend=backend)
+        out_path = Path(tmp) / f"{version_id}.wav"
+        result = render_score(document, out_path, backend=backend,
+                              soundfont=os.environ.get("WORKBENCH_SOUNDFONT"))
         data = Path(result.path).read_bytes()
     is_midi = result.backend == "midi-file"
     store = get_store()
@@ -347,13 +536,28 @@ def score_export(version_id: str) -> dict[str, Any]:
 
 
 @app.get("/api/artifact/{token}")
-def artifact_get(token: str) -> Response:
+def artifact_get(token: str, request: Request) -> Response:
     """Download a previously produced artifact (render/export) by token."""
     record = get_store().get_artifact(token)
+    headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(record.filename)}",
+               "Accept-Ranges": "bytes"}
+    data = record.data
+    total = len(data)
+    range_header = request.headers.get("range")
+    if range_header is not None:
+        match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header)
+        if match is not None and (match[1] or match[2]):
+            start = int(match[1]) if match[1] else max(0, total - int(match[2]))
+            end = min(int(match[2]), total - 1) if match[1] and match[2] else total - 1
+            if 0 <= start <= end < total:
+                headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+                return Response(content=data[start:end + 1], status_code=206,
+                                media_type=record.content_type, headers=headers)
+        return Response(status_code=416, headers={**headers, "Content-Range": f"bytes */{total}"})
     return Response(
-        content=record.data,
+        content=data,
         media_type=record.content_type,
-        headers={"Content-Disposition": f'attachment; filename="{record.filename}"'},
+        headers=headers,
     )
 
 
@@ -378,6 +582,8 @@ def project_status() -> dict[str, Any]:
             "project": project_config_to_dict(config),
             "active_version": store.active_version_id(),
             "versions": _versions_summary(store.list_versions()),
+            "working_version": config.extra.get("working_version"),
+            "storage": "sqlite",
         },
         tool="project_status",
         version=__version__,
@@ -408,7 +614,10 @@ def project_update_goal(body: GoalUpdateRequest) -> dict[str, Any]:
 @app.post("/api/project/decision")
 def project_record_decision(body: DecisionRequest) -> dict[str, Any]:
     """Append an explicit, audit-log-style decision to the project config."""
-    config, decision = get_store().record_decision(
+    store = get_store()
+    if body.chosen_version_id is not None and not store.has_version(body.chosen_version_id):
+        raise VersionNotFound(body.chosen_version_id)
+    config, decision = store.record_decision(
         summary=body.summary,
         chosen_version_id=body.chosen_version_id,
         reason=body.reason,
@@ -503,7 +712,7 @@ def memory_record_episode(body: MemoryEpisodeRequest) -> dict[str, Any]:
     store = get_memory_store()
     event = store.record_episode(
         actor_id=body.actor_id,
-        project_id=body.project_id,
+        project_id=_memory_project(body.project_id),
         summary=body.summary,
         details=body.details,
     )
@@ -525,7 +734,7 @@ def memory_propose_claim(body: MemoryClaimRequest) -> dict[str, Any]:
     store = get_memory_store()
     claim = store.propose_claim(
         actor_id=body.actor_id,
-        project_id=body.project_id,
+        project_id=_memory_project(body.project_id),
         subject_type=body.subject_type,
         subject_id=body.subject_id,
         predicate=body.predicate,
@@ -571,7 +780,7 @@ def memory_confirm_claim(
 def memory_query(body: MemoryQueryRequest) -> dict[str, Any]:
     """Plan channel-specific recall and return a ranked recall view."""
     plan = RecallPlanner().plan(
-        project_id=body.project_id,
+        project_id=_memory_project(body.project_id),
         subject_id=body.subject_id,
         need_raw_history=body.need_raw_history,
         time_horizon=body.time_horizon,
@@ -592,7 +801,7 @@ def learning_record_outcome(body: LearningOutcomeRequest) -> dict[str, Any]:
     state = get_memory_store().record_learning_outcome(
         actor_id=body.actor_id,
         subject_id=body.subject_id,
-        project_id=body.project_id,
+        project_id=_memory_project(body.project_id),
         focus=body.focus,
         status=body.status,
         mastery=body.mastery,
@@ -609,6 +818,7 @@ def learning_record_outcome(body: LearningOutcomeRequest) -> dict[str, Any]:
 @app.get("/api/memory/project/{project_id}")
 def memory_project_state(project_id: str) -> dict[str, Any]:
     """Inspect explicit project and learning projections without raw history."""
+    _memory_project(project_id)
     store = get_memory_store()
     return envelope(
         {
@@ -626,6 +836,26 @@ def memory_project_state(project_id: str) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # Small shared helpers
 # --------------------------------------------------------------------------- #
+
+def _memory_project(project_id: str | None) -> str | None:
+    selected = request_project_id()
+    if selected is not None and project_id is not None and project_id != selected:
+        raise ValueError("memory operation belongs to a different project")
+    return project_id or selected
+
+def _score_region(
+    document: ScoreDocument, start_beat: float | None, end_beat: float | None,
+    track_ids: str | None,
+) -> Region | None:
+    if (start_beat is None) != (end_beat is None):
+        raise ValueError("inspect region requires both start_beat and end_beat")
+    tids = tuple(value.strip() for value in track_ids.split(",") if value.strip()) if track_ids else None
+    if tids and not set(tids) <= {note.track_id for note in document.notes}:
+        raise ValueError("selection references an unknown note track")
+    if start_beat is None and not tids:
+        return None
+    return Region(start_beat if start_beat is not None else 0.0,
+                  end_beat if end_beat is not None else document.duration_beats, tids)
 
 def _region_brief(region: Region | None, document: Any) -> dict[str, object]:
     """A compact region description for the inspect result."""

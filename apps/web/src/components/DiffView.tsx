@@ -1,12 +1,14 @@
+import { useProjectApi } from "./ProjectApiContext";
 // A/B comparison: pick two stored versions, show the semantic diff keyed on
 // stable note ids, and (optionally) choose variant B as the main version while
 // recording a decision with a learning-flavoured reason.
 
 import { useEffect, useState } from "react";
 
-import { api, errMsg } from "../api";
+import { errMsg } from "../api";
 import type { NoteChange, ScoreDiff, VersionSummary } from "../types";
 import { Button, Empty, Section, Tag } from "./common";
+import { ABPlayer } from "./ABPlayer";
 
 function versionLabel(version: VersionSummary): string {
   return `${version.branch ?? version.version_id.slice(0, 8)} · ${version.origin}`;
@@ -64,6 +66,7 @@ export function DiffView({
   onError: (message: string) => void;
   onChanged: () => void;
 }) {
+  const api = useProjectApi();
   const [diff, setDiff] = useState<ScoreDiff | null>(null);
   const [reason, setReason] = useState("");
   const [tags, setTags] = useState("");
@@ -86,12 +89,13 @@ export function DiffView({
     };
   }, [aId, bId, onError]);
 
-  async function chooseB() {
-    if (!bId) return;
+  async function choose(side: "a" | "b") {
+    const chosenId = side === "a" ? aId : bId;
+    if (!chosenId) return;
     setBusy(true);
     try {
       await api.choose({
-        chosen_version_id: bId,
+        chosen_version_id: chosenId,
         reason: reason || undefined,
         tags:
           tags.length > 0
@@ -135,6 +139,8 @@ export function DiffView({
         </label>
       </div>
 
+      {ready && aId && bId ? <ABPlayer key={`${aId}:${bId}`} aId={aId} bId={bId} /> : null}
+
       {!ready ? (
         <Empty>选择两个不同的版本以查看语义差异。</Empty>
       ) : !diff ? (
@@ -153,7 +159,7 @@ export function DiffView({
           )}
 
           <div className="choose-box">
-            <h4>选择版本 B 作为正式版本（记录项目决策）</h4>
+            <h4>试听后选择正式版本并记录理由</h4>
             <input
               value={reason}
               onChange={(e) => setReason(e.target.value)}
@@ -164,9 +170,12 @@ export function DiffView({
               onChange={(e) => setTags(e.target.value)}
               placeholder="标签,逗号分隔(如 bass,timing)"
             />
-            <Button variant="primary" disabled={busy} onClick={chooseB}>
-              {busy ? "记录中…" : "选择 B 并记录决策"}
-            </Button>
+            <div className="action-row">
+              <Button disabled={busy} onClick={() => void choose("a")}>保留 A 并记录决策</Button>
+              <Button variant="primary" disabled={busy} onClick={() => void choose("b")}>
+                {busy ? "记录中…" : "选择 B 并记录决策"}
+              </Button>
+            </div>
           </div>
         </>
       )}

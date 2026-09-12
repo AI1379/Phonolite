@@ -29,13 +29,9 @@ from music_core.ir import (
     NoteEvent,
     ScoreDocument,
     Region,
-    beat_to_bar,
-    meter_beats_per_bar,
 )
+from music_core.timing import region_bars
 
-# When no meter is present we still want readable bar numbers, so we assume
-# 4/4. The beat span in Location is always the source of truth.
-_DEFAULT_BEATS_PER_BAR = 4.0
 # Octave used to normalise pitch-distance similarities into [0, 1].
 _PITCH_NORMALISER = 12.0
 
@@ -80,20 +76,15 @@ class Finding:
     interpretation: str
     confidence: float
     alternatives: list[str]
-
-
-def _resolve_beats_per_bar(doc: ScoreDocument) -> float:
-    """Beats per bar from the first meter, else the 4/4 default."""
-    if doc.meters:
-        return meter_beats_per_bar(doc.meters[0])
-    return _DEFAULT_BEATS_PER_BAR
+    category: str = "overview"
+    note_ids: tuple[str, ...] = ()
 
 
 def _effective_region(doc: ScoreDocument, region: Region | None) -> Region:
     """The region to analyse: the given one, or the whole document span."""
     if region is not None:
         return region
-    end = doc.duration_beats if doc.notes else 0.0
+    end = doc.duration_beats
     return Region(0.0, end if end > 0.0 else 0.0)
 
 
@@ -101,14 +92,11 @@ def _location(
     region: Region, doc: ScoreDocument, notes: list[NoteEvent]
 ) -> Location:
     """Build a Location, attaching bar numbers when a meter is known."""
-    bpb = _resolve_beats_per_bar(doc)
     has_meter = bool(doc.meters)
     bars: tuple[int, int] | None = None
-    if has_meter and region.end_beat > region.start_beat:
-        bars = (
-            beat_to_bar(region.start_beat, bpb),
-            max(beat_to_bar(region.start_beat, bpb), beat_to_bar(region.end_beat, bpb) - 1),
-        )
+    spans = region_bars(doc, region)
+    if has_meter and spans:
+        bars = (spans[0].number, spans[-1].number)
     track_ids = tuple(sorted({n.track_id for n in notes})) if notes else tuple()
     if region.track_ids is not None:
         track_ids = region.track_ids
@@ -139,20 +127,23 @@ def _bass_pitch_at(beat: float, notes: list[NoteEvent]) -> int | None:
 
 
 def _bass_pitches_per_bar(
-    notes: list[NoteEvent], region: Region, beats_per_bar: float
+    notes: list[NoteEvent], region: Region, doc: ScoreDocument
 ) -> list[int]:
-    """The lowest bass pitch sampled at each bar downbeat in ``region``.
+    """Lowest pitch at each selected bar start, or its first non-silent attack.
 
-    Only bars with a sounding bass note contribute; gaps are omitted so that
-    contour similarity is not skewed by rests.
+    Empty bars are omitted. A partial first bar is sampled at the selection
+    start; this is a representative pitch sequence, not full voice extraction.
     """
     bass: list[int] = []
-    bar_start = region.start_beat
-    while bar_start < region.end_beat:
-        pitch = _bass_pitch_at(bar_start, notes)
+    for bar in region_bars(doc, region):
+        pitch = _bass_pitch_at(bar.start, notes)
+        if pitch is None:
+            attacks = [n.onset_beats for n in notes
+                       if bar.start <= n.onset_beats < bar.end and n.duration_beats > 0]
+            if attacks:
+                pitch = _bass_pitch_at(min(attacks), notes)
         if pitch is not None:
             bass.append(pitch)
-        bar_start += beats_per_bar
     return bass
 
 
@@ -210,19 +201,13 @@ def analyze_register(
 
     # Per-bar register: detect bars that share the exact same min/max, which
     # is one dimension of the "static/repetitive" feeling the slice targets.
-    bpb = _resolve_beats_per_bar(doc)
     per_bar: list[tuple[int, int, int]] = []  # (bar, min, max)
-    bar_start = eff.start_beat
-    bar_no = beat_to_bar(eff.start_beat, bpb)
-    while bar_start < eff.end_beat:
-        bar_end = min(bar_start + bpb, eff.end_beat)
+    for bar in region_bars(doc, eff):
         bar_notes = [
-            n.pitch for n in notes if n.onset_beats < bar_end and n.offset_beats > bar_start
+            n.pitch for n in notes if n.onset_beats < bar.end and n.offset_beats > bar.start
         ]
         if bar_notes:
-            per_bar.append((bar_no, min(bar_notes), max(bar_notes)))
-        bar_start += bpb
-        bar_no += 1
+            per_bar.append((bar.number, min(bar_notes), max(bar_notes)))
     if len(per_bar) >= 2:
         same_min = sum(1 for i in range(1, len(per_bar)) if per_bar[i][1] == per_bar[0][1])
         same_max = sum(1 for i in range(1, len(per_bar)) if per_bar[i][2] == per_bar[0][2])
@@ -264,15 +249,16 @@ def analyze_density(
         return []
     loc = _location(eff, doc, notes)
     span = eff.end_beat - eff.start_beat
-    note_rate = len(notes) / span
+    attacks = [n for n in notes if eff.start_beat <= n.onset_beats < eff.end_beat]
+    note_rate = len(attacks) / span
 
     # Average simultaneous notes: sweep weighted by time.
     events: list[tuple[float, int]] = []
     for n in notes:
         end = n.offset_beats if n.duration_beats > 0.0 else n.onset_beats
         if end > n.onset_beats:
-            events.append((n.onset_beats, 1))
-            events.append((end, -1))
+            events.append((max(n.onset_beats, eff.start_beat), 1))
+            events.append((min(end, eff.end_beat), -1))
     events.sort()
     active = 0
     last_t = events[0][0] if events else eff.start_beat
@@ -288,21 +274,22 @@ def analyze_density(
         Finding(
             observation=(
                 f"Density is {note_rate:.2f} notes/beat "
-                f"({len(notes)} notes over {span:.1f} beats) "
-                f"with {avg_simultaneity:.2f} notes sounding on average."
+                f"({len(attacks)} attacks over {span:.1f} beats) "
+                f"with {avg_simultaneity:.2f} keys held on average (pedal excluded)."
             ),
             location=loc,
             evidence=[
                 Evidence("notes_per_beat", round(note_rate, 3)),
                 Evidence("note_count", len(notes)),
+                Evidence("attack_count", len(attacks)),
                 Evidence("average_simultaneous_notes", round(avg_simultaneity, 3)),
             ],
             interpretation=(
                 f"{'Sparse' if avg_simultaneity < 2.0 else 'Dense'} "
                 f"texture in {loc.render_bars()}."
             ),
-            confidence=1.0,
-            alternatives=[],
+            confidence=0.85,
+            alternatives=["Pedal, articulation and instrumentation can change perceived density."],
         )
     ]
 
@@ -316,8 +303,7 @@ def analyze_bass_contour(
     if not notes:
         return []
     loc = _location(eff, doc, notes)
-    bpb = _resolve_beats_per_bar(doc)
-    bass = _bass_pitches_per_bar(notes, eff, bpb)
+    bass = _bass_pitches_per_bar(notes, eff, doc)
     if len(bass) < 2:
         return [
             Finding(
@@ -341,13 +327,16 @@ def analyze_bass_contour(
         contour_word = "rising"
     elif falling > rising and falling >= static:
         contour_word = "falling"
-    else:
+    elif static > 0 and static >= max(rising, falling):
         contour_word = "static"
+    else:
+        contour_word = "mixed"
 
     evidence: list[Evidence] = [
         Evidence("bass_direction_steps_rising", rising),
         Evidence("bass_direction_steps_falling", falling),
         Evidence("bass_direction_steps_static", static),
+        Evidence("bass_net_semitones", bass[-1] - bass[0]),
     ]
 
     # First vs. second half similarity — the design example's
@@ -359,7 +348,7 @@ def analyze_bass_contour(
         if similarity is not None:
             evidence.append(Evidence("bass_contour_similarity", round(similarity, 3)))
 
-    interpretation = f"Bass contour is {contour_word}."
+    interpretation = f"Sampled bass movement is predominantly {contour_word}; net pitch change is {bass[-1] - bass[0]:+d} semitones."
     confidence = 1.0
     alternatives: list[str] = []
     if similarity is not None and similarity >= 0.75:
@@ -376,7 +365,7 @@ def analyze_bass_contour(
     return [
         Finding(
             observation=(
-                f"Bass contour samples (per bar): {bass}; net direction {contour_word} "
+                f"Bass contour samples (per bar): {bass}; common movement {contour_word} "
                 f"({rising} up, {falling} down, {static} static)."
             ),
             location=loc,
@@ -389,13 +378,109 @@ def analyze_bass_contour(
 
 
 def inspect(doc: ScoreDocument, region: Region | None = None) -> list[Finding]:
-    """Run the stage-1 analyses (register, density, bass contour) over a region.
-
-    This backs the ``inspect_score`` tool. Order is deterministic: register,
-    then density, then bass contour — matching the design doc listing.
-    """
+    """Run bounded, deterministic register, density, bass, rhythm and harmony analysis."""
+    if len(region_bars(doc, _effective_region(doc, region))) > 256:
+        raise ValueError("Select at most 256 bars for detailed musical analysis")
     return [
         *analyze_register(doc, region),
         *analyze_density(doc, region),
         *analyze_bass_contour(doc, region),
+        *analyze_rhythm(doc, region),
+        *analyze_harmony(doc, region),
     ]
+
+
+def analyze_rhythm(doc: ScoreDocument, region: Region | None = None) -> list[Finding]:
+    """Compare adjacent full bars by attack positions on a sixteenth-note grid.
+
+    Simultaneous chord notes count as one attack. Durations, pitch and velocity
+    are deliberately excluded, so repeating attacks never imply identical music.
+    """
+    eff = _effective_region(doc, region)
+    notes = _notes_in(doc, region)
+    bars = region_bars(doc, eff)
+    findings: list[Finding] = []
+    for before, after in zip(bars, bars[1:]):
+        if not before.complete or not after.complete or before.beats_per_bar != after.beats_per_bar:
+            continue
+        left = {round((n.onset_beats - before.start) * 4) for n in notes
+                if before.start <= n.onset_beats < before.end}
+        right = {round((n.onset_beats - after.start) * 4) for n in notes
+                 if after.start <= n.onset_beats < after.end}
+        if not left or not right:
+            continue
+        similarity = len(left & right) / len(left | right)
+        if similarity < 0.75:
+            continue
+        selected = [n for n in notes if before.start <= n.onset_beats < after.end]
+        location = _location(Region(before.start, after.end, eff.track_ids), doc, selected)
+        findings.append(Finding(
+            observation=f"Bars {before.number} and {after.number} share {similarity:.0%} of attack positions on a sixteenth-note grid.",
+            location=location,
+            evidence=[Evidence("attack_pattern_similarity", round(similarity, 3)),
+                      Evidence("grid_quarter_beats", 0.25),
+                      Evidence("first_bar_attack_offsets", ", ".join(f"{x / 4:g}" for x in sorted(left))),
+                      Evidence("second_bar_attack_offsets", ", ".join(f"{x / 4:g}" for x in sorted(right)))],
+            interpretation="Repeated attack placement may contribute to rhythmic predictability. Try changing one attack while preserving pitches.",
+            confidence=0.8,
+            alternatives=["A recurring rhythmic pattern may provide intentional cohesion.",
+                          "Durations, accents and microtiming can distinguish these bars despite matching attack positions."],
+            category="rhythm", note_ids=tuple(n.id for n in selected),
+        ))
+    return findings
+
+
+_PITCH_CLASSES = ("C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B")
+_CHORD_SHAPES: tuple[tuple[str, tuple[int, ...]], ...] = (
+    ("major", (0, 4, 7)), ("minor", (0, 3, 7)),
+    ("diminished", (0, 3, 6)), ("augmented", (0, 4, 8)),
+    ("7", (0, 4, 7, 10)), ("maj7", (0, 4, 7, 11)), ("m7", (0, 3, 7, 10)),
+)
+
+
+def analyze_harmony(doc: ScoreDocument, region: Region | None = None) -> list[Finding]:
+    """Offer up to three complete chord templates per bar using duration coverage.
+
+    This is pitch-class aggregation, not key, Roman-numeral or cadence analysis.
+    Each template must contain only observed classes; missing chord tones are
+    never invented. All durations are clipped to the selected bar.
+    """
+    eff = _effective_region(doc, region)
+    notes = _notes_in(doc, region)
+    findings: list[Finding] = []
+    for bar in region_bars(doc, eff):
+        selected = [n for n in notes if n.onset_beats < bar.end and n.offset_beats > bar.start]
+        weights: dict[int, float] = {}
+        for note in selected:
+            duration = min(bar.end, note.offset_beats) - max(bar.start, note.onset_beats)
+            weights[note.pitch % 12] = weights.get(note.pitch % 12, 0.0) + duration
+        if len(weights) < 3:
+            continue
+        total = sum(weights.values())
+        candidates: list[tuple[float, int, str]] = []
+        for root in range(12):
+            for name, intervals in _CHORD_SHAPES:
+                classes = {(root + interval) % 12 for interval in intervals}
+                if not classes <= weights.keys():
+                    continue
+                coverage = sum(weights[pc] for pc in classes) / total
+                if coverage >= 0.7:
+                    candidates.append((coverage, len(classes), f"{_PITCH_CLASSES[root]} {name}"))
+        candidates.sort(key=lambda candidate: (-candidate[0], -candidate[1], candidate[2]))
+        labels = [name for _, _, name in candidates[:3]]
+        observed = ", ".join(_PITCH_CLASSES[pc] for pc in sorted(weights))
+        loc = _location(Region(bar.start, bar.end, eff.track_ids), doc, selected)
+        findings.append(Finding(
+            observation=f"Bar {bar.number} contains pitch classes {observed} (key-held durations, pedal excluded).",
+            location=loc,
+            evidence=[Evidence("pitch_classes", observed),
+                      Evidence("chord_candidates", "; ".join(labels) or "No complete template covers 70%"),
+                      Evidence("best_duration_coverage", round(candidates[0][0], 3) if candidates else 0.0)],
+            interpretation=(f"Possible chord collections: {' / '.join(labels)}. Check the bass and phrase context before assigning a harmonic function."
+                            if labels else "This bar does not fit a single supported chord template; inspect shorter regions or separate voices."),
+            confidence=min(0.85, candidates[0][0] * (0.85 if len(labels) == 1 else 0.7)) if candidates else 0.5,
+            alternatives=["Several harmonies, passing tones or arpeggios may occur within one bar.",
+                          "Pitch-class matching does not establish a key, spelling, inversion or resolution."],
+            category="harmony", note_ids=tuple(n.id for n in selected),
+        ))
+    return findings

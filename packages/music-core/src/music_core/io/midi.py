@@ -19,8 +19,9 @@ Conventions:
   - ``track_name`` meta events on note-bearing tracks are preserved via
     ``metadata["track_names"]`` and re-emitted on export.
 
-Out of scope (MVP): program changes, CC, pitch bend, aftertouch, markers,
-lyrics, SMPTE. These are ignored on import.
+CC (including sustain), program changes, pitch bend and pressure are retained
+in the IR and re-emitted. Unsupported meta/system data emits import warnings.
+SMPTE and asynchronous type-2 files are rejected.
 """
 
 from __future__ import annotations
@@ -28,11 +29,13 @@ from __future__ import annotations
 from io import BytesIO
 from pathlib import Path
 from collections.abc import Sequence
+from dataclasses import replace
 
 import mido
 
 from music_core.ir import (
     MetadataValue,
+    MidiChannelEvent,
     MeterEvent,
     NoteEvent,
     ScoreDocument,
@@ -48,7 +51,11 @@ def load_midi(path: str | Path, *, document_id: str | None = None) -> ScoreDocum
 
 def loads_midi(data: bytes, *, document_id: str | None = None) -> ScoreDocument:
     """Load a standard MIDI file from a bytes buffer into a ScoreDocument."""
-    return _convert(mido.MidiFile(file=BytesIO(data)), document_id=document_id)
+    try:
+        midi = mido.MidiFile(file=BytesIO(data))
+    except (EOFError, OSError) as exc:
+        raise ValueError("Invalid or truncated Standard MIDI File") from exc
+    return _convert(midi, document_id=document_id)
 
 
 def dump_midi(doc: ScoreDocument, path: str | Path) -> None:
@@ -67,6 +74,8 @@ def _convert(mid: mido.MidiFile, *, document_id: str | None) -> ScoreDocument:
     """Shared import logic for an opened :class:`mido.MidiFile`."""
     if mid.ticks_per_beat is None or mid.ticks_per_beat <= 0:
         raise ValueError("SMPTE-timecode MIDI files are not supported")
+    if mid.type == 2:
+        raise ValueError("Asynchronous type-2 MIDI tracks cannot share a score timeline")
     ppq = mid.ticks_per_beat
 
     # Collected per physical file track; IR track IDs are assigned only to
@@ -77,6 +86,9 @@ def _convert(mid: mido.MidiFile, *, document_id: str | None) -> ScoreDocument:
     warnings: list[str] = []
     note_bearing: list[int] = []  # physical indices, in order
     names_by_physical: dict[int, str] = {}
+    performance: list[tuple[int, MidiChannelEvent]] = []
+    ignored: dict[str, int] = {}
+    end_beats = 0.0
 
     for physical_index, track in enumerate(mid.tracks):
         abs_tick = 0
@@ -85,7 +97,7 @@ def _convert(mid: mido.MidiFile, *, document_id: str | None) -> ScoreDocument:
         # Open note_on events awaiting their note_off, FIFO per pitch.
         pending: dict[tuple[int, int], list[tuple[int, int]]] = {}
 
-        for msg in track:
+        for order, msg in enumerate(track):
             abs_tick += msg.time
             last_tick = abs_tick
 
@@ -104,9 +116,18 @@ def _convert(mid: mido.MidiFile, *, document_id: str | None) -> ScoreDocument:
                     )
                 elif msg.type == "track_name" and physical_index not in names_by_physical:
                     names_by_physical[physical_index] = msg.name
+                elif msg.type not in ("track_name", "end_of_track"):
+                    ignored[msg.type] = ignored.get(msg.type, 0) + 1
                 continue
 
+            if msg.type == "sysex":
+                ignored[msg.type] = ignored.get(msg.type, 0) + 1
+                continue
             has_channel_events = True
+            event = _performance_event(msg, abs_tick / ppq, order)
+            if event is not None:
+                performance.append((physical_index, event))
+                continue
             is_note_on = msg.type == "note_on" and msg.velocity > 0
             is_note_off = msg.type == "note_off" or (
                 msg.type == "note_on" and msg.velocity == 0
@@ -140,7 +161,10 @@ def _convert(mid: mido.MidiFile, *, document_id: str | None) -> ScoreDocument:
                         f"unmatched note_off {msg.note} in file track "
                         f"{physical_index} at tick {abs_tick}"
                     )
+            else:
+                ignored[msg.type] = ignored.get(msg.type, 0) + 1
 
+        end_beats = max(end_beats, last_tick / ppq)
         if has_channel_events:
             note_bearing.append(physical_index)
 
@@ -183,6 +207,9 @@ def _convert(mid: mido.MidiFile, *, document_id: str | None) -> ScoreDocument:
         "track_names": dict(track_names),
         "import_warnings": list(warnings),
     }
+    warnings.extend(f"Unsupported MIDI {kind}: {count} event(s) not retained"
+                    for kind, count in sorted(ignored.items()))
+    metadata["import_warnings"] = list(warnings)
     return ScoreDocument(
         id=document_id or new_event_id("score"),
         ppq=ppq,
@@ -190,7 +217,49 @@ def _convert(mid: mido.MidiFile, *, document_id: str | None) -> ScoreDocument:
         tempos=sorted(tempos, key=lambda t: t.beat),
         meters=sorted(meters, key=lambda m: m.beat),
         metadata=metadata,
+        channel_events=[replace(event, track_id=track_ids[physical])
+                        for physical, event in performance],
+        length_beats=end_beats,
     )
+
+
+def _performance_event(msg: mido.Message, beat: float, order: int) -> MidiChannelEvent | None:
+    """Narrow dynamic mido channel data at the IO boundary."""
+    kind: object = getattr(msg, "type", None)
+    if kind not in ("control_change", "program_change", "pitchwheel", "aftertouch", "polytouch"):
+        return None
+    channel = _message_int(msg, "channel")
+    if kind == "control_change":
+        return MidiChannelEvent("", beat, channel, "control_change", (_message_int(msg, "control"), _message_int(msg, "value")), order)
+    if kind == "program_change":
+        return MidiChannelEvent("", beat, channel, "program_change", (_message_int(msg, "program"),), order)
+    if kind == "pitchwheel":
+        return MidiChannelEvent("", beat, channel, "pitchwheel", (_message_int(msg, "pitch"),), order)
+    if kind == "aftertouch":
+        return MidiChannelEvent("", beat, channel, "aftertouch", (_message_int(msg, "value"),), order)
+    if kind == "polytouch":
+        return MidiChannelEvent("", beat, channel, "polytouch", (_message_int(msg, "note"), _message_int(msg, "value")), order)
+    return None
+
+
+def _message_int(msg: mido.Message, field: str) -> int:
+    value: object = getattr(msg, field, None)
+    if not isinstance(value, int):
+        raise ValueError(f"MIDI {field} must be an integer")
+    return value
+
+
+def _performance_message(event: MidiChannelEvent) -> mido.Message:
+    values = event.values
+    if event.kind == "control_change":
+        return mido.Message(event.kind, channel=event.channel, control=values[0], value=values[1])
+    elif event.kind == "program_change":
+        return mido.Message(event.kind, channel=event.channel, program=values[0])
+    elif event.kind == "pitchwheel":
+        return mido.Message(event.kind, channel=event.channel, pitch=values[0])
+    elif event.kind == "polytouch":
+        return mido.Message(event.kind, channel=event.channel, note=values[0], value=values[1])
+    return mido.Message(event.kind, channel=event.channel, value=values[0])
 
 
 def _make_note(
@@ -253,8 +322,12 @@ def _to_midi_file(doc: ScoreDocument) -> mido.MidiFile:
     notes_by_track: dict[str, list[NoteEvent]] = {}
     for note in doc.notes:
         notes_by_track.setdefault(note.track_id, []).append(note)
+    for event in doc.channel_events:
+        notes_by_track.setdefault(event.track_id, [])
 
-    for track_id in sorted(notes_by_track):
+    for track_id in sorted(notes_by_track, key=lambda name: (
+        int(name[6:]) if name.startswith("track-") and name[6:].isdigit() else -1, name
+    )):
         events: list[tuple[int, mido.Message]] = []
         for note in notes_by_track[track_id]:
             channel = note.channel if note.channel is not None else 0
@@ -291,6 +364,12 @@ def _to_midi_file(doc: ScoreDocument) -> mido.MidiFile:
                 int(getattr(event[1], "note", -1)),
             )
         )
+        # Retain controller ordering at equal beats. Controllers precede notes
+        # on export so program/pedal state is ready for a simultaneous attack.
+        controls = [(round(event.beat * doc.ppq), _performance_message(event))
+                    for event in sorted(doc.channel_events, key=lambda event: (event.beat, event.order))
+                    if event.track_id == track_id]
+        events = sorted([*controls, *events], key=lambda item: item[0])
 
         head: list[tuple[int, mido.MetaMessage]] = []
         if track_id in track_names:
@@ -299,8 +378,11 @@ def _to_midi_file(doc: ScoreDocument) -> mido.MidiFile:
             )
         mid.tracks.append(_deltas([*head, *events]))
 
+    end_tick = max([round(doc.duration_beats * doc.ppq),
+                    *(sum(int(getattr(message, "time", 0)) for message in track) for track in mid.tracks)])
     for track in mid.tracks:
-        track.append(mido.MetaMessage("end_of_track", time=0))
+        elapsed = sum(int(getattr(message, "time", 0)) for message in track)
+        track.append(mido.MetaMessage("end_of_track", time=max(0, end_tick - elapsed)))
 
     return mid
 

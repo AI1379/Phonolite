@@ -1,0 +1,16 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "share": "disabled",
+  "snapshot": false,
+  "mcp": {
+    "music": {
+      "type": "local",
+      "command": ["uv", "run", "music-mcp"],
+      "enabled": true,
+      "environment": {
+        "WORKBENCH_API_URL": "{env:WORKBENCH_API_URL}"
+      },
+      "timeout": 30000
+    }
+  }
+}

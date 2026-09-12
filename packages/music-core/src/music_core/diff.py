@@ -89,6 +89,12 @@ def _classify_and_diff(before: NoteEvent, after: NoteEvent) -> NoteChange:
         changes["voice_id"] = (before.voice_id, after.voice_id)
     if before.channel != after.channel:
         changes["channel"] = (before.channel, after.channel)
+    if before.role != after.role:
+        changes["role"] = (before.role, after.role)
+    if before.transcription_status != after.transcription_status:
+        changes["transcription_status"] = (before.transcription_status, after.transcription_status)
+    if before.reference_evidence != after.reference_evidence:
+        changes["reference_evidence"] = (str(before.reference_evidence), str(after.reference_evidence))
 
     # TODO: `kind` classifies by geometry (onset/duration), so a simultaneous
     # pitch change is only visible in `field_changes`, not in the summary kind.

@@ -6,10 +6,13 @@ requires-python = ">=3.12,<3.13"
 license = { text = "MIT" }
 authors = [{ name = "Phonolite Project" }]
 dependencies = [
+    "agent-runtime",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "music-core",
     "memory-core",
+    "audio-core",
+    "soundfile>=0.13",
 ]
 
 [project.scripts]
@@ -23,5 +26,7 @@ build-backend = "hatchling.build"
 packages = ["src/workbench_server"]
 
 [tool.uv.sources]
+agent-runtime = { workspace = true }
 music-core = { workspace = true }
 memory-core = { workspace = true }
+audio-core = { workspace = true }

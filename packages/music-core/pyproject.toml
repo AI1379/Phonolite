@@ -2,12 +2,13 @@
 name = "music-core"
 version = "0.1.0"
 description = "Host-independent music domain core: Score IR, IO, analysis, transforms (Music Agent Workbench)"
-readme = "../../README.md"
+readme = { text = "Host-independent music domain core for Music Agent Workbench. See the repository README for usage.", content-type = "text/markdown" }
 requires-python = ">=3.12,<3.13"
 license = { text = "MIT" }
 authors = [{ name = "Phonolite Project" }]
 dependencies = [
     "mido>=1.3",
+    "numpy>=2.0",
     "pyyaml>=6.0.3",
 ]
 

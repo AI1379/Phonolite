@@ -16,7 +16,7 @@ export function VersionTree({
   onSelect: (versionId: string) => void;
 }) {
   if (versions.length === 0) {
-    return <p className="muted empty">尚无版本——导入一段 MIDI 开始。</p>;
+    return <p className="muted empty">本项目尚无版本。新建草稿或导入 MIDI 后，修改历史会显示在这里。</p>;
   }
   return (
     <ul className="version-tree">
@@ -36,7 +36,7 @@ export function VersionTree({
               </span>
               <span className="row-tags">
                 <span className={`tag origin ${version.origin}`}>
-                  {version.origin === "import" ? "导入" : "变换"}
+                  {({import:"导入",transform:"变换",draft:"草稿",edit:"校正"} as Record<string,string>)[version.origin] ?? version.origin}
                 </span>
                 {isActive ? <span className="tag active">主版本</span> : null}
               </span>

@@ -1,45 +1,23 @@
-"""In-memory project state for the Domain API (design doc section 10).
-
-The first vertical slice needs somewhere to keep the imported score, the
-versions produced by transforms, and the running ``project.yaml`` config so
-that ``inspect`` / ``compare`` / ``render`` / ``record_decision`` can refer to
-them by id across requests. This module is that place.
-
-It is deliberately in-memory and single-project: the design doc (section 20)
-names SQLite as the right persistence layer, but MVP-1 is a local, single-user
-file workflow and a mutable in-memory store keeps the slice end-to-end
-runnable without dragging in schema migrations. The public surface
-(``get_version`` / ``add_version`` / ``record_decision`` / ...) is small enough
-that a SQLite-backed implementation can swap in later without touching routes.
-
-The store is a process-wide singleton accessed through :func:`get_store`;
-tests call :meth:`InMemoryProjectStore.reset` (via the ``client`` fixture) so
-they stay isolated.
-"""
+"""Shared store records and lazy lifecycle for durable SQLite project storage."""
 
 from __future__ import annotations
 
 import base64
 import binascii
-import uuid
-from dataclasses import dataclass, replace
-from datetime import datetime, timezone
-from typing import Final
+import os
+from contextlib import contextmanager
+from contextvars import ContextVar
+from collections.abc import Generator
+from pathlib import Path
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from workbench_server.persistence import SQLiteProjectStore
 
 from music_core.ir import ScoreDocument
-from music_core.project import (
-    Decision,
-    GoalRegion,
-    MusicalContext,
-    ProjectConfig,
-    ProjectGoal,
-    ProjectSchemaError,
-    record_decision,
-    set_active_version,
-)
+from music_core.project import ProjectSchemaError
 from workbench_server.serialization import score_summary_to_dict
-
-_DEFAULT_TITLE: Final[str] = "Untitled Project"
 
 
 class VersionNotFound(KeyError):
@@ -53,6 +31,15 @@ class VersionNotFound(KeyError):
         return f"version not found: {self.version_id}"
 
 
+class ProjectNotFound(KeyError):
+    def __init__(self, project_id: str) -> None:
+        self.project_id = project_id
+        super().__init__(project_id)
+
+    def __str__(self) -> str:
+        return f"project not found: {self.project_id}"
+
+
 class ArtifactNotFound(KeyError):
     """Raised when an artifact token is unknown or has expired."""
 
@@ -64,14 +51,6 @@ class ArtifactNotFound(KeyError):
         return f"artifact not found: {self.token}"
 
 
-def _new_project_id() -> str:
-    return f"project-{uuid.uuid4().hex[:12]}"
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
 @dataclass(frozen=True)
 class StoredVersion:
     """A score version held by the store, with provenance for the version tree."""
@@ -80,7 +59,7 @@ class StoredVersion:
     document: ScoreDocument
     parent_id: str | None
     branch: str
-    origin: str  # "import" | "transform"
+    origin: str  # "import" | "transform" | "draft" | "edit"
     created_at: str
     description: str
 
@@ -99,7 +78,7 @@ class StoredVersion:
 
 @dataclass(frozen=True)
 class ArtifactRecord:
-    """A render/export product kept in memory and downloadable by token."""
+    """A persisted render/export product downloadable by its stable token."""
 
     token: str
     content_type: str
@@ -107,149 +86,53 @@ class ArtifactRecord:
     data: bytes
 
 
-class InMemoryProjectStore:
-    """Holds one project's config, version tree, and generated artifacts."""
-
-    def __init__(self) -> None:
-        self._config: ProjectConfig | None = None
-        self._versions: dict[str, StoredVersion] = {}
-        self._artifacts: dict[str, ArtifactRecord] = {}
-
-    # -- lifecycle --------------------------------------------------------- #
-    def reset(self) -> None:
-        """Clear all state. Called by the test fixture before each test."""
-        self._config = None
-        self._versions = {}
-        self._artifacts = {}
-
-    # -- config ------------------------------------------------------------ #
-    @property
-    def config(self) -> ProjectConfig:
-        """The project config, creating a default one on first access."""
-        if self._config is None:
-            self._config = ProjectConfig(id=_new_project_id(), title=_DEFAULT_TITLE)
-        return self._config
-
-    def ensure_project(self, *, project_id: str | None, title: str | None) -> ProjectConfig:
-        """Initialise the project if needed, applying any id/title overrides.
-
-        Once a project exists we keep its id stable (it is the anchor
-        ``project.yaml`` identity), so later calls only update the title.
-        """
-        if self._config is None:
-            self._config = ProjectConfig(
-                id=project_id or _new_project_id(),
-                title=title or _DEFAULT_TITLE,
-            )
-        elif title is not None:
-            self._config = replace(self._config, title=title)
-        return self._config
-
-    def update_musical_context(self, context: MusicalContext) -> ProjectConfig:
-        self._config = replace(self.config, musical_context=context)
-        return self._config
-
-    # -- versions ---------------------------------------------------------- #
-    def add_version(
-        self,
-        document: ScoreDocument,
-        *,
-        parent_id: str | None,
-        branch: str,
-        origin: str,
-        description: str,
-    ) -> StoredVersion:
-        """Register a new version keyed by its (already-minted) document id."""
-        version = StoredVersion(
-            version_id=document.id,
-            document=document,
-            parent_id=parent_id,
-            branch=branch,
-            origin=origin,
-            created_at=_now_iso(),
-            description=description,
-        )
-        self._versions[version.version_id] = version
-        return version
-
-    def get_version(self, version_id: str) -> StoredVersion:
-        """Return a version or raise :class:`VersionNotFound`."""
-        version = self._versions.get(version_id)
-        if version is None:
-            raise VersionNotFound(version_id)
-        return version
-
-    def has_version(self, version_id: str) -> bool:
-        return version_id in self._versions
-
-    def list_versions(self) -> list[StoredVersion]:
-        """Versions in insertion order (oldest import first)."""
-        return list(self._versions.values())
-
-    def active_version_id(self) -> str | None:
-        return self.config.active_version
-
-    # -- project mutations ------------------------------------------------- #
-    def update_goal(
-        self,
-        description: str,
-        bars: tuple[int, int] | None,
-        beats: tuple[float, float] | None,
-    ) -> ProjectConfig:
-        region = GoalRegion(bars=bars, beats=beats) if (bars is not None or beats is not None) else None
-        goal = ProjectGoal(description=description, region=region)
-        self._config = replace(self.config, current_goal=goal)
-        return self._config
-
-    def record_decision(
-        self,
-        *,
-        summary: str,
-        chosen_version_id: str | None = None,
-        reason: str | None = None,
-        tags: tuple[str, ...] = (),
-    ) -> tuple[ProjectConfig, Decision]:
-        """Append a decision immutably via ``music_core.project``."""
-        self._config, decision = record_decision(
-            self.config,
-            summary=summary,
-            chosen_version_id=chosen_version_id,
-            reason=reason,
-            tags=tags,
-        )
-        return self._config, decision
-
-    def accept_variant(self, version_id: str) -> ProjectConfig:
-        """Promote ``version_id`` to active; the version must already exist."""
-        if not self.has_version(version_id):
-            raise VersionNotFound(version_id)
-        self._config = set_active_version(self.config, version_id)
-        return self._config
-
-    # -- artifacts --------------------------------------------------------- #
-    def store_artifact(
-        self, *, content_type: str, filename: str, data: bytes
-    ) -> ArtifactRecord:
-        token = uuid.uuid4().hex
-        record = ArtifactRecord(
-            token=token, content_type=content_type, filename=filename, data=data
-        )
-        self._artifacts[token] = record
-        return record
-
-    def get_artifact(self, token: str) -> ArtifactRecord:
-        record = self._artifacts.get(token)
-        if record is None:
-            raise ArtifactNotFound(token)
-        return record
+_project_store: SQLiteProjectStore | None = None
+_request_project: ContextVar[str | None] = ContextVar("workbench_project", default=None)
 
 
-_STORE = InMemoryProjectStore()
+def get_workspace_store() -> SQLiteProjectStore:
+    """Lazily open the durable project store; tests configure an isolated path."""
+    global _project_store
+    if _project_store is None:
+        from workbench_server.persistence import SQLiteProjectStore
+        _project_store = SQLiteProjectStore(os.environ.get("WORKBENCH_DB_PATH", str(Path.cwd() / "project.db")))
+    return _project_store
 
 
-def get_store() -> InMemoryProjectStore:
-    """Process-wide singleton; tests reset it through the ``client`` fixture."""
-    return _STORE
+def get_store() -> SQLiteProjectStore:
+    """Bind each request to its captured project, even if the workspace switches."""
+    workspace = get_workspace_store()
+    project_id = _request_project.get()
+    return workspace.for_project(project_id) if project_id is not None else workspace
+
+
+@contextmanager
+def project_scope(project_id: str | None) -> Generator[None, None, None]:
+    token = _request_project.set(project_id)
+    try:
+        yield
+    finally:
+        _request_project.reset(token)
+
+
+def request_project_id() -> str | None:
+    return _request_project.get()
+
+
+def configure_project_store(path: str | Path) -> SQLiteProjectStore:
+    global _project_store
+    from workbench_server.persistence import SQLiteProjectStore
+    if _project_store is not None:
+        _project_store.close()
+    _project_store = SQLiteProjectStore(path)
+    return _project_store
+
+
+def close_project_store() -> None:
+    global _project_store
+    if _project_store is not None:
+        _project_store.close()
+    _project_store = None
 
 
 def decode_midi_b64(midi_b64: str) -> bytes:
@@ -263,10 +146,11 @@ def decode_midi_b64(midi_b64: str) -> bytes:
 __all__ = [
     "ArtifactNotFound",
     "ArtifactRecord",
-    "InMemoryProjectStore",
     "ProjectSchemaError",
     "StoredVersion",
     "VersionNotFound",
     "decode_midi_b64",
     "get_store",
+    "configure_project_store",
+    "close_project_store",
 ]

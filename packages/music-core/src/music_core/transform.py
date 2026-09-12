@@ -15,6 +15,7 @@ heuristic or rendering claim is made.
 from __future__ import annotations
 
 import copy
+import math
 from dataclasses import dataclass
 
 from music_core.ir import (
@@ -69,6 +70,9 @@ def _clone_note(note: NoteEvent) -> NoteEvent:
         channel=note.channel,
         articulations=list(note.articulations),
         source_ref=note.source_ref,
+        role=note.role,
+        transcription_status=note.transcription_status,
+        reference_evidence=note.reference_evidence,
     )
 
 
@@ -82,6 +86,9 @@ def _fork_document(doc: ScoreDocument, *, branch: str) -> ScoreDocument:
         meters=list(doc.meters),
         markers=copy.deepcopy(doc.markers),
         metadata={**doc.metadata, "branch": branch, "parent_version": doc.id},
+        channel_events=list(doc.channel_events),
+        length_beats=doc.length_beats,
+        reference=doc.reference,
     )
 
 
@@ -133,12 +140,16 @@ def delay_bass_resolution(
     onset in the same track or escape the region; clamped notes are reported
     in the validation warnings.
     """
-    if delay_beats < 0.0:
+    if not math.isfinite(delay_beats) or delay_beats < 0.0:
         raise ValueError(f"delay_beats must be non-negative, got {delay_beats}")
     forked = _fork_document(doc, branch=branch)
     region_notes = [n for n in forked.notes if region.start_beat <= n.onset_beats < region.end_beat]
-    in_scope = [n for n in region_notes if n.track_id in (region.track_ids or (n.track_id,))]
-    bass_ids = _bass_note_ids([n for n in forked.notes if n.duration_beats > 0.0])
+    scope_ids = {n.id for n in doc.select_region(region)}
+    in_scope = [n for n in region_notes if n.id in scope_ids]
+    eligible = [n for n in doc.notes
+                if (region.track_ids is None or n.track_id in region.track_ids)
+                and (region.voice_ids is None or n.voice_id in region.voice_ids)]
+    bass_ids = _bass_note_ids(eligible)
 
     changed: list[str] = []
     warnings: list[str] = []
@@ -150,7 +161,7 @@ def delay_bass_resolution(
             continue
         next_onsets = [
             n.onset_beats
-            for n in forked.notes
+            for n in doc.notes
             if n.id in bass_ids
             and n.track_id == note.track_id
             and n.onset_beats > note.onset_beats
@@ -175,6 +186,9 @@ def delay_bass_resolution(
     # bass-collision warning.
     validation = validate_region(forked, region=region)
     validation.warnings.extend(warnings)
+    validation.warnings.append("This shifts low-note attacks; no harmonic resolution or cadence has been inferred.")
+    if doc.channel_events:
+        validation.warnings.append("Performance events (including pedal) retain their original timing; audition the result.")
     bars_note = f"{len(changed)} bass note(s)"
     return TransformResult(
         document=forked,
@@ -207,7 +221,7 @@ def rhythmic_scaling(
     # TODO: scaling moves notes in absolute beats but leaves the conductor map
     # (tempos/meters/markers) untouched, so a scaled region can desync from
     # bar/meter boundaries. Decide whether to also scale the map or warn.
-    if factor <= 0.0:
+    if not math.isfinite(factor) or factor <= 0.0:
         raise ValueError(f"factor must be positive, got {factor}")
     if factor == 1.0:
         raise ValueError("factor == 1.0 would leave the score unchanged")
@@ -218,12 +232,18 @@ def rhythmic_scaling(
     for note in forked.notes:
         if region.track_ids is not None and note.track_id not in region.track_ids:
             continue
+        if region.voice_ids is not None and note.voice_id not in region.voice_ids:
+            continue
         if region.start_beat <= note.onset_beats < region.end_beat:
             note.onset_beats = region.start_beat + (note.onset_beats - region.start_beat) * factor
             note.duration_beats = note.duration_beats * factor
             changed.append(note.id)
 
-    validation = validate_region(forked, region=region)
+    validation = validate_region(forked)
+    if any(n.id in changed and n.offset_beats > region.end_beat for n in forked.notes):
+        validation.warnings.append("Scaled notes extend past the selected region; later material and tempo/meter maps remain fixed.")
+    if doc.channel_events:
+        validation.warnings.append("Performance events (including pedal) retain their original timing; audition the result.")
     return TransformResult(
         document=forked,
         branch=resolved_branch,
@@ -237,18 +257,61 @@ def rhythmic_scaling(
     )
 
 
+def shift_note_onset(
+    doc: ScoreDocument, region: Region, *, note_id: str, shift_beats: float,
+    branch: str = "exp/attack-shift",
+) -> TransformResult:
+    """Move one explicitly selected attack while retaining pitch and duration."""
+    if not math.isfinite(shift_beats) or shift_beats == 0:
+        raise ValueError("shift_beats must be finite and nonzero")
+    note = next((n for n in doc.select_region(region) if n.id == note_id), None)
+    if note is None or not region.start_beat <= note.onset_beats < region.end_beat:
+        raise ValueError("choose a note whose attack lies inside the selected region")
+    onset = note.onset_beats + shift_beats
+    if not region.start_beat <= onset < region.end_beat:
+        raise ValueError("shifted attack must remain inside the selected region")
+    forked = _fork_document(doc, branch=branch)
+    target = next(n for n in forked.notes if n.id == note_id)
+    target.onset_beats = onset
+    report = validate_region(forked)
+    if target.offset_beats > region.end_beat:
+        report.warnings.append("The moved note sustains past the region end because its duration is preserved.")
+    if doc.channel_events:
+        report.warnings.append("Pedal and other performance events keep their original timing.")
+    return TransformResult(forked, branch, "shift_note_onset",
+                           f"Moved note {note_id} by {shift_beats:g} beats; pitch, duration and velocity preserved.",
+                           [note_id], report)
+
+
+def _numeric_parameter(request: TransformRequest, key: str) -> float:
+    value = request.parameters.get(key)
+    if value is None or isinstance(value, bool):
+        raise ValueError(f"{key} is required and must be a finite number")
+    result = float(value)
+    if not math.isfinite(result):
+        raise ValueError(f"{key} must be a finite number")
+    return result
+
+
 def apply_transform(doc: ScoreDocument, request: TransformRequest) -> TransformResult:
     """Dispatch a :class:`TransformRequest` to the named operation."""
     op = request.operation
     params = request.parameters
     if op == "delay_bass_resolution":
-        delay = float(params["delay_beats"])
+        delay = _numeric_parameter(request, "delay_beats")
         return delay_bass_resolution(
             doc, request.region, delay_beats=delay, branch=request.output_branch
         )
     if op == "rhythmic_scaling":
-        factor = float(params["factor"])
+        factor = _numeric_parameter(request, "factor")
         return rhythmic_scaling(
             doc, request.region, factor=factor, branch=request.output_branch
         )
+    if op == "shift_note_onset":
+        note_id = params.get("note_id")
+        if not isinstance(note_id, str):
+            raise ValueError("note_id is required for shifting one attack")
+        return shift_note_onset(doc, request.region, note_id=note_id,
+                                shift_beats=_numeric_parameter(request, "shift_beats"),
+                                branch=request.output_branch)
     raise ValueError(f"Unknown transform operation: {op!r}")

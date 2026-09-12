@@ -1,9 +1,10 @@
+import { useProjectApi } from "./ProjectApiContext";
 // Project state panel: the current goal (editable), the musical context,
 // preserve/avoid/learning-focus notes, and the decision audit log.
 
 import { useEffect, useState } from "react";
 
-import { api, errMsg } from "../api";
+import { errMsg } from "../api";
 import type { ProjectConfig } from "../types";
 import { Button, Empty, Section, Tag } from "./common";
 
@@ -29,6 +30,7 @@ export function ProjectPanel({
   onError: (message: string) => void;
   onChanged: () => void;
 }) {
+  const api = useProjectApi();
   const goal = project.current_goal;
   const [desc, setDesc] = useState(goal?.description ?? "");
   const [barLo, setBarLo] = useState(goal?.region?.bars?.[0]?.toString() ?? "");
@@ -61,7 +63,7 @@ export function ProjectPanel({
   const decisions = project.decisions ?? [];
 
   return (
-    <Section title={`项目 · ${project.title}`}>
+    <Section title="项目目标与决策">
       <dl className="meta-grid">
         <dt>project_id</dt>
         <dd>{project.id}</dd>

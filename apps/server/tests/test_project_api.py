@@ -37,12 +37,12 @@ def test_update_goal_without_region(client: TestClient) -> None:
     assert "region" not in project["current_goal"]
 
 
-def test_record_decision_appends_to_audit_log(client: TestClient) -> None:
+def test_record_decision_appends_to_audit_log(client: TestClient, imported_main: str) -> None:
     resp = client.post(
         "/api/project/decision",
         json={
             "summary": "pick the late-bass variant",
-            "chosen_version_id": "v9",
+            "chosen_version_id": imported_main,
             "reason": "tension is kept longer",
             "tags": ["bass", "timing"],
         },
@@ -51,7 +51,7 @@ def test_record_decision_appends_to_audit_log(client: TestClient) -> None:
     result = resp.json()["result"]
     decision = result["decision"]
     assert decision["summary"] == "pick the late-bass variant"
-    assert decision["chosen_version_id"] == "v9"
+    assert decision["chosen_version_id"] == imported_main
     assert decision["reason"] == "tension is kept longer"
     assert decision["tags"] == ["bass", "timing"]
     assert decision["id"].startswith("decision_")

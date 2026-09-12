@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import wave
 
 import pytest
 
@@ -55,15 +56,16 @@ def test_render_score_uses_injected_backend_and_produces_midi(tmp_path: Path) ->
     assert result.warnings == ["sample_rate=44100"]
 
 
-def test_auto_falls_back_to_midi_without_synth(tmp_path: Path) -> None:
-    # Neither fluidsynth nor musescore is available in CI/minimal envs, so
-    # auto should land on the MIDI fallback and warn about it.
+def test_auto_produces_audio_without_external_synth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("music_core.render._which_any", lambda _names: None)
     out = tmp_path / "out.wav"
     result = render_score(_doc(), out, backend="auto")
-    assert result.backend == "midi-file"
-    assert result.path.endswith("out.mid")
+    assert result.backend == "preview"
+    assert result.path.endswith("out.wav")
     assert Path(result.path).is_file()
-    assert any("MIDI instead of audio" in w for w in result.warnings)
+    with wave.open(result.path) as audio:
+        assert audio.getnframes() > 0
+        assert audio.getsampwidth() == 2
 
 
 def test_explicit_midi_backend_writes_mid(tmp_path: Path) -> None:

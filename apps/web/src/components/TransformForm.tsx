@@ -1,11 +1,12 @@
+import { useProjectApi } from "./ProjectApiContext";
 // Controlled-transform form. Enforces the "one variable per experiment" red
 // line: the operation picker reveals only the parameter relevant to that
 // operation (delay_beats OR factor), and the region scopes where it applies.
 
 import { useState } from "react";
 
-import { api, errMsg } from "../api";
-import type { VersionSummary } from "../types";
+import { errMsg } from "../api";
+import type { VersionSummary, ScoreRegion } from "../types";
 import { Button, Section } from "./common";
 
 export function TransformForm({
@@ -13,15 +14,22 @@ export function TransformForm({
   onError,
   onDone,
   onCancel,
+  initialRegion,
+  noteId,
 }: {
   source: VersionSummary;
   onError: (message: string) => void;
-  onDone: (newVersionId: string) => void;
+  onDone: (newVersionId: string, warnings: string[]) => void;
   onCancel: () => void;
+  initialRegion?: ScoreRegion;
+  noteId?: string;
 }) {
-  const [operation, setOperation] = useState("delay_bass_resolution");
-  const [start, setStart] = useState("0");
-  const [end, setEnd] = useState(String(source.duration_beats));
+  const api = useProjectApi();
+  const [operation, setOperation] = useState(noteId ? "shift_note_onset" : "delay_bass_resolution");
+  const [start, setStart] = useState(String(initialRegion?.start_beat ?? 0));
+  const [end, setEnd] = useState(String(initialRegion?.end_beat ?? source.duration_beats));
+  const [trackId, setTrackId] = useState(initialRegion?.track_ids?.[0] ?? "");
+  const [shift, setShift] = useState("0.5");
   const [delayBeats, setDelayBeats] = useState("1.0");
   const [factor, setFactor] = useState("2.0");
   const [branch, setBranch] = useState("");
@@ -33,12 +41,16 @@ export function TransformForm({
       const region = {
         start_beat: Number(start),
         end_beat: Number(end),
+        track_ids: trackId ? [trackId] : undefined,
       };
       const parameters: Record<string, string | number | boolean> = {};
       if (operation === "delay_bass_resolution") {
         parameters.delay_beats = Number(delayBeats);
-      } else {
+      } else if (operation === "rhythmic_scaling") {
         parameters.factor = Number(factor);
+      } else {
+        parameters.note_id = noteId ?? "";
+        parameters.shift_beats = Number(shift);
       }
       const env = await api.transform({
         source_version_id: source.version_id,
@@ -47,7 +59,7 @@ export function TransformForm({
         parameters,
         output_branch: branch || undefined,
       });
-      onDone(env.result.version.version_id);
+      onDone(env.result.version.version_id, [...env.result.validation.errors, ...env.result.validation.warnings]);
     } catch (e) {
       onError(errMsg(e));
     } finally {
@@ -66,13 +78,17 @@ export function TransformForm({
           操作
           <select value={operation} onChange={(e) => setOperation(e.target.value)}>
             <option value="delay_bass_resolution">
-              delay_bass_resolution（推迟低音解决时间）
+              推迟选区低音起音（不推断和声解决）
             </option>
             <option value="rhythmic_scaling">
               rhythmic_scaling（节奏缩放）
             </option>
+            {noteId ? <option value="shift_note_onset">只移动所选音符的起音</option> : null}
           </select>
         </label>
+        <label>目标音轨<select value={trackId} onChange={(e) => setTrackId(e.target.value)}>
+          <option value="">全部音轨</option>{source.track_ids.map((id) => <option key={id} value={id}>{id}</option>)}
+        </select></label>
         <label>
           区间 start beat
           <input
@@ -98,7 +114,7 @@ export function TransformForm({
               inputMode="decimal"
             />
           </label>
-        ) : (
+        ) : operation === "rhythmic_scaling" ? (
           <label>
             factor（&gt;1 放大,&lt;1 缩小,不能为 1）
             <input
@@ -107,7 +123,7 @@ export function TransformForm({
               inputMode="decimal"
             />
           </label>
-        )}
+        ) : <label>起音位移（拍，正数推迟、负数提前）<input aria-label="起音位移" value={shift} onChange={(e) => setShift(e.target.value)} /></label>}
         <label>
           输出分支名（可选）
           <input

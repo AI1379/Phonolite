@@ -42,6 +42,8 @@ export interface VersionSummary {
   created_at: string;
   description: string;
   import_warnings?: string[];
+  kind?: string;
+  reference?: ScoreReference | null;
 }
 
 export interface RegionBrief {
@@ -71,6 +73,22 @@ export interface Finding {
   interpretation: string;
   confidence: number;
   alternatives: string[];
+  category: string;
+  note_ids: string[];
+}
+
+export interface ScorePage {
+  version: VersionSummary;
+  notes: Note[];
+  total_notes: number;
+  offset: number;
+  next_offset: number | null;
+}
+
+export interface ScoreRegion {
+  start_beat: number;
+  end_beat: number;
+  track_ids?: string[];
 }
 
 export interface InspectResult {
@@ -89,6 +107,28 @@ export interface Note {
   velocity: number;
   voice_id?: string;
   channel?: number;
+  role?: "melody" | "bass" | "inner" | "unknown";
+  transcription_status?: "uncertain" | "confirmed" | null;
+  reference_evidence?: { asset_id: string; start_seconds: number; end_seconds: number; method: string };
+}
+
+export interface AlignmentAnchor { seconds: number; beat: number }
+export interface ScoreReference { asset_id: string; anchors: AlignmentAnchor[] }
+export interface ReferenceMedia {
+  id: string; filename: string; sha256: string; duration_seconds: number;
+  sample_rate: number; channels: number; original_token: string; playback_token: string | null;
+  peaks: [number, number][]; anchors: AlignmentAnchor[];
+  media_kind: "audio" | "video";
+  video_token: string | null;
+  video_width: number | null;
+  video_height: number | null;
+  has_audio: boolean;
+  warnings: string[];
+}
+export interface NoteInput {
+  pitch: number; onset_beats: number; duration_beats: number; velocity: number;
+  track_id: string; role: "melody" | "bass" | "inner" | "unknown";
+  transcription_status: "uncertain" | "confirmed";
 }
 
 export type FieldValue = string | number | null;
@@ -181,7 +221,17 @@ export interface ProjectStatus {
   project: ProjectConfig;
   active_version: string | null;
   versions: VersionSummary[];
+  working_version?: string | null;
+  storage?: string;
 }
+
+export interface ProjectSummary {
+  id: string; title: string; workflow: "composition" | "transcription" | "existing";
+  active_version: string | null; working_version: string | null;
+  version_count: number; reference_count: number; created_at: string; updated_at: string;
+}
+
+export interface ProjectCatalog { projects: ProjectSummary[]; active_project_id: string | null }
 
 export interface TransformRequestBody {
   source_version_id: string;
@@ -191,4 +241,33 @@ export interface TransformRequestBody {
   output_branch?: string;
   preserve?: string[];
   vary?: string[];
+}
+
+export type AgentMode = "analyze" | "learn" | "experiment";
+export type AgentTaskStatus =
+  | "queued"
+  | "running"
+  | "cancelling"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export interface AgentTaskEvent {
+  sequence: number;
+  type: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface AgentTask {
+  task_id: string;
+  prompt: string;
+  mode: AgentMode;
+  status: AgentTaskStatus;
+  workspace: string;
+  session_id: string | null;
+  project_id?: string | null;
+  created_at: string;
+  updated_at: string;
+  events: AgentTaskEvent[];
 }

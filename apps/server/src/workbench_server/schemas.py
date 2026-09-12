@@ -7,6 +7,8 @@ All musical work stays in ``music_core``; nothing here computes a result.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from memory_core import ClaimType, JsonValue
@@ -153,3 +155,18 @@ class LearningOutcomeRequest(BaseModel):
     status: str
     mastery: float = Field(ge=0.0, le=1.0)
     evidence: str | None = None
+
+
+class AgentTaskRequest(BaseModel):
+    """Delegate a new task to one of the three Workbench agent modes."""
+
+    prompt: str = Field(min_length=1)
+    mode: Literal["analyze", "learn", "experiment"] = "analyze"
+    session_id: str | None = None
+
+
+class AgentResumeRequest(BaseModel):
+    """Continue an existing OpenCode session in a selected Workbench mode."""
+
+    prompt: str = Field(min_length=1)
+    mode: Literal["analyze", "learn", "experiment"] = "analyze"

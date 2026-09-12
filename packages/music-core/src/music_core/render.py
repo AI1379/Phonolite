@@ -1,19 +1,16 @@
 """Audio render backends for the Score IR (design doc issue #8).
 
-Renders a :class:`~music_core.ir.ScoreDocument` to an audio file via an
-external synth. Two real backends are supported, both invoked through their
-command-line interface so no Python binding has to ship with the package:
+Renders a :class:`~music_core.ir.ScoreDocument` to audio using optional
+external synthesizers or the built-in reference-tone backend:
 
   - **FluidSynth** (``fluidsynth`` CLI + a SoundFont), the preferred path;
-  - **MuseScore** (``musescore`` / ``mscore`` CLI).
+  - **MuseScore** (``musescore`` / ``mscore`` CLI);
+  - **Preview** (numpy, tempo/velocity/sustain, fixed reference timbre).
 
 Neither is required at install time: backends report availability via
 :meth:`AudioBackend.is_available`, and ``render_score(..., backend="auto")``
-picks the first available one. If no audio synth is present we fall back to
-writing the prepared MIDI to disk and emit a warning — this keeps the
-vertical slice end-to-end runnable anywhere while being explicit that the
-result is not yet audio. Tests inject a stub backend, so no real synth is
-needed for coverage.
+tries available external backends, then produces an actual preview WAV even
+without a synth installation. MIDI file output must be requested explicitly.
 """
 
 from __future__ import annotations
@@ -26,7 +23,8 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from music_core.ir import ScoreDocument
-from music_core.io.midi import dumps_midi
+from music_core.io.midi import dumps_midi, loads_midi
+from music_core.preview import render_preview
 
 
 class RenderError(RuntimeError):
@@ -68,7 +66,10 @@ def _which_any(names: tuple[str, ...]) -> str | None:
 
 
 def _run(cmd: list[str]) -> str:
-    proc = subprocess.run(cmd, capture_output=True, check=False)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, check=False, timeout=120)
+    except subprocess.TimeoutExpired as exc:
+        raise RenderError("Audio renderer timed out after 120 seconds") from exc
     if proc.returncode != 0:
         stderr = proc.stderr.decode(errors="replace").strip()
         raise RenderError(
@@ -138,12 +139,7 @@ class MuseScoreBackend:
 
 @dataclass
 class MidiFileBackend:
-    """Always-available fallback: write the prepared MIDI to disk.
-
-    Not audio — ``render_score`` only selects this when no synth is present,
-    and always warns about it. Useful so the slice stays runnable in minimal
-    environments and for deterministic tests.
-    """
+    """Explicit file exchange backend; this output is MIDI, not audio."""
 
     name: str = "midi-file"
 
@@ -156,9 +152,21 @@ class MidiFileBackend:
         midi_path = out_path.with_suffix(".mid")
         midi_path.write_bytes(midi_bytes)
         return [
-            "No audio synth found; wrote MIDI instead of audio. "
-            "Install FluidSynth + a SoundFont for audio output."
+            "Explicit MIDI output; select preview or auto for playable WAV audio."
         ]
+
+
+@dataclass
+class PreviewBackend:
+    """Always-available reference-tone audio backend."""
+
+    name: str = "preview"
+
+    def is_available(self) -> bool:
+        return True
+
+    def render(self, *, midi_bytes: bytes, out_path: Path, sample_rate: int) -> list[str]:
+        return render_preview(loads_midi(midi_bytes), out_path, sample_rate)
 
 
 def _resolve_backends(
@@ -167,8 +175,7 @@ def _resolve_backends(
     """Turn the ``backend`` argument into an ordered list of backends.
 
     Returns ``(backends, is_auto)``. When ``is_auto`` and the caller did not
-    force a single named backend, audio backends are tried first and the MIDI
-    fallback is appended last as a guarantee.
+    force a single named backend, external backends precede built-in preview.
     """
     if not isinstance(backend, str):
         return [backend], False
@@ -178,8 +185,10 @@ def _resolve_backends(
         return [MuseScoreBackend()], False
     if backend == "midi":
         return [MidiFileBackend()], False
+    if backend == "preview":
+        return [PreviewBackend()], False
     if backend == "auto":
-        return [FluidSynthBackend(soundfont=soundfont), MuseScoreBackend(), MidiFileBackend()], True
+        return [FluidSynthBackend(soundfont=soundfont), MuseScoreBackend(), PreviewBackend()], True
     raise ValueError(f"Unknown backend: {backend!r}")
 
 
@@ -193,9 +202,9 @@ def render_score(
 ) -> RenderResult:
     """Render ``doc`` to ``out_path`` using the selected backend.
 
-    With ``backend="auto"`` (default), the first *available* backend wins:
-    FluidSynth, then MuseScore, then the always-on MIDI fallback. Passing an
-    :class:`AudioBackend` instance (e.g. a test stub) uses it directly.
+    With ``backend="auto"`` (default), try FluidSynth, MuseScore, then preview.
+    Explicit backends surface failures; auto retains failure warnings while
+    trying its next candidate. An injected backend is used directly.
     """
     midi_bytes = dumps_midi(doc)
     candidates, is_auto = _resolve_backends(backend, soundfont)
@@ -204,21 +213,21 @@ def render_score(
     # never fail on a missing parent.
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    if is_auto:
-        chosen = next((b for b in candidates if b.is_available()), None)
-        if chosen is None:
-            raise RenderError("No available render backend (tried fluidsynth, musescore).")
-    else:
-        chosen = candidates[0]
+    failures: list[str] = []
+    for chosen in candidates:
         if not chosen.is_available():
-            raise RenderError(
-                f"Requested backend {chosen.name!r} is not available in this environment."
-            )
-
-    warnings = chosen.render(midi_bytes=midi_bytes, out_path=target, sample_rate=sample_rate)
-    actual_path = target
-    if isinstance(chosen, MidiFileBackend):
-        actual_path = target.with_suffix(".mid")
-    return RenderResult(
-        path=str(actual_path), backend=chosen.name, warnings=warnings
-    )
+            if is_auto:
+                continue
+            raise RenderError(f"Requested backend {chosen.name!r} is not available in this environment.")
+        actual_path = target.with_suffix(".mid") if isinstance(chosen, MidiFileBackend) else target
+        try:
+            warnings = chosen.render(midi_bytes=midi_bytes, out_path=target, sample_rate=sample_rate)
+            if not actual_path.is_file() or actual_path.stat().st_size == 0:
+                raise RenderError(f"{chosen.name} produced no output")
+        except (RenderError, OSError) as exc:
+            if not is_auto:
+                raise RenderError(str(exc)) from exc
+            failures.append(f"{chosen.name} failed: {exc}")
+            continue
+        return RenderResult(path=str(actual_path), backend=chosen.name, warnings=[*failures, *warnings])
+    raise RenderError("No usable audio renderer: " + "; ".join(failures))

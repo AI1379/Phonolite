@@ -74,6 +74,12 @@ def note_to_dict(note: NoteEvent) -> dict[str, object]:
         out["articulations"] = list(note.articulations)
     if note.source_ref is not None:
         out["source_ref"] = note.source_ref
+    out["role"] = note.role
+    out["transcription_status"] = note.transcription_status
+    if note.reference_evidence is not None:
+        evidence = note.reference_evidence
+        out["reference_evidence"] = {"asset_id": evidence.asset_id, "start_seconds": evidence.start_seconds,
+                                     "end_seconds": evidence.end_seconds, "method": evidence.method}
     return out
 
 
@@ -86,12 +92,7 @@ def _tempo_to_dict(tempo: TempoEvent) -> dict[str, object]:
 
 
 def score_summary_to_dict(doc: ScoreDocument) -> dict[str, object]:
-    """Compact, stable view of a score version (no per-note listing).
-
-    Full note listings are never needed by the API: ``export_score`` streams
-    MIDI bytes and ``compare_versions`` returns a structured diff. The summary
-    is enough for the UI/agent to identify a version and its musical frame.
-    """
+    """Compact view for version lists; score_get separately pages actual notes."""
     track_ids = sorted({n.track_id for n in doc.notes})
     meta = doc.metadata
     out: dict[str, object] = {
@@ -102,6 +103,10 @@ def score_summary_to_dict(doc: ScoreDocument) -> dict[str, object]:
         "track_ids": track_ids,
         "meters": [_meter_to_dict(m) for m in doc.meters],
         "tempos": [_tempo_to_dict(t) for t in doc.tempos],
+        "kind": doc.metadata.get("kind", "score"),
+        "reference": ({"asset_id": doc.reference.asset_id,
+                       "anchors": [{"seconds": item.seconds, "beat": item.beat} for item in doc.reference.anchors]}
+                      if doc.reference is not None else None),
     }
     branch = meta.get("branch")
     if isinstance(branch, str):
@@ -139,6 +144,8 @@ def finding_to_dict(finding: Finding) -> dict[str, object]:
         "interpretation": finding.interpretation,
         "confidence": finding.confidence,
         "alternatives": list(finding.alternatives),
+        "category": finding.category,
+        "note_ids": list(finding.note_ids),
     }
 
 

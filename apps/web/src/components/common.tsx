@@ -2,7 +2,8 @@
 
 import type { ReactNode } from "react";
 
-import { api } from "../api";
+import { useProjectApi } from "./ProjectApiContext";
+import { pauseOtherMedia } from "./mediaPlayback";
 
 export function Section({
   title,
@@ -83,6 +84,7 @@ export function ArtifactLink({
   contentType: string;
   sizeBytes?: number;
 }) {
+  const api = useProjectApi();
   const url = api.artifactUrl(token);
   const kb = sizeBytes !== undefined ? `${(sizeBytes / 1024).toFixed(1)} KB` : null;
   const playable = contentType === "audio/wav";
@@ -92,7 +94,7 @@ export function ArtifactLink({
         {filename}
       </a>
       {kb ? <span className="muted">{kb}</span> : null}
-      {playable ? <audio controls src={url} /> : null}
+      {playable ? <audio controls src={url} onPlay={(event) => pauseOtherMedia(event.currentTarget)} /> : null}
     </span>
   );
 }

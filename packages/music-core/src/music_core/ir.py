@@ -17,7 +17,10 @@ Conventions:
 from __future__ import annotations
 
 import uuid
+import math
 from dataclasses import dataclass, field
+from typing import Literal
+from music_core.reference import NoteEvidence, ScoreReference
 
 
 type MetadataValue = (
@@ -51,7 +54,8 @@ class Region:
     voice_ids: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
-        if self.start_beat < 0.0 or self.end_beat < self.start_beat:
+        if (not math.isfinite(self.start_beat) or not math.isfinite(self.end_beat)
+                or self.start_beat < 0.0 or self.end_beat < self.start_beat):
             raise ValueError(
                 f"Region must satisfy 0 <= start <= end, got "
                 f"[{self.start_beat}, {self.end_beat})"
@@ -115,6 +119,9 @@ class NoteEvent:
     channel: int | None = None
     articulations: list[str] = field(default_factory=list)
     source_ref: str | None = None
+    role: Literal["melody", "bass", "inner", "unknown"] = "unknown"
+    transcription_status: Literal["uncertain", "confirmed"] | None = None
+    reference_evidence: NoteEvidence | None = None
 
     @property
     def offset_beats(self) -> float:
@@ -135,6 +142,23 @@ class MeterEvent:
     denominator: int
 
 
+@dataclass(frozen=True)
+class MidiChannelEvent:
+    """Host-neutral performance data retained alongside notation notes.
+
+    Values follow MIDI units: CC=(controller, value), program/pressure/bend
+    have one value, and poly pressure=(pitch, pressure). Order breaks ties
+    between events at the same beat within their original track.
+    """
+
+    track_id: str
+    beat: float
+    channel: int
+    kind: Literal["control_change", "program_change", "pitchwheel", "aftertouch", "polytouch"]
+    values: tuple[int, ...]
+    order: int = 0
+
+
 @dataclass
 class ScoreDocument:
     """A versioned score: the unit that analyses and transforms operate on."""
@@ -146,13 +170,15 @@ class ScoreDocument:
     meters: list[MeterEvent] = field(default_factory=list)
     markers: list[dict[str, MetadataValue]] = field(default_factory=list)
     metadata: dict[str, MetadataValue] = field(default_factory=dict)
+    channel_events: list[MidiChannelEvent] = field(default_factory=list)
+    length_beats: float = 0.0
+    reference: ScoreReference | None = None
 
     @property
     def duration_beats(self) -> float:
-        """End of the last sounding note, in beats (0.0 for an empty score)."""
-        if not self.notes:
-            return 0.0
-        return max(note.offset_beats for note in self.notes)
+        """Last note release or performance event, including a trailing pedal-up."""
+        return max([self.length_beats, 0.0, *(note.offset_beats for note in self.notes),
+                    *(event.beat for event in self.channel_events)])
 
     def select_region(self, region: Region) -> list[NoteEvent]:
         """Notes overlapping ``region`` (half-open), filtered by tracks/voices.
@@ -163,6 +189,8 @@ class ScoreDocument:
         onset only. Result is sorted by ``(onset, pitch)`` for stable output.
         """
         selected: list[NoteEvent] = []
+        if region.start_beat == region.end_beat:
+            return selected
         for note in self.notes:
             if region.track_ids is not None and note.track_id not in region.track_ids:
                 continue
@@ -171,7 +199,9 @@ class ScoreDocument:
             ):
                 continue
             offset = note.offset_beats if note.duration_beats > 0.0 else note.onset_beats
-            if note.onset_beats < region.end_beat and offset > region.start_beat:
+            if (region.start_beat <= note.onset_beats < region.end_beat
+                    if note.duration_beats == 0.0 else
+                    note.onset_beats < region.end_beat and offset > region.start_beat):
                 selected.append(note)
         selected.sort(key=lambda n: (n.onset_beats, n.pitch))
         return selected

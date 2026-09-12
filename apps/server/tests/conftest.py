@@ -14,13 +14,13 @@ from music_core.io.midi import dumps_midi
 
 from workbench_server.main import app
 from workbench_server.memory import configure_memory_store
-from workbench_server.store import get_store
+from workbench_server.store import configure_project_store
 
 
 @pytest.fixture
 def client(tmp_path: Path) -> Iterator[TestClient]:
     """A test client backed by isolated project and persistent-memory stores."""
-    get_store().reset()
+    configure_project_store(tmp_path / "project.db")
     configure_memory_store(tmp_path / "project.db")
     with TestClient(app) as test_client:
         yield test_client

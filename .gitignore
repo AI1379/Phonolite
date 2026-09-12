@@ -31,6 +31,8 @@ apps/web/dist/
 project.db
 project.db-shm
 project.db-wal
+examples/*.wav
+examples/*.mp4
 
 # uv lock is kept under version control by default; comment out to ignore
 # uv.lock

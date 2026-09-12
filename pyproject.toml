@@ -1,7 +1,8 @@
 # uv workspace root — virtual (no package is built from this directory).
 #
 # Members:
-#   packages/*      shared libraries (music-core, audio-core)
+#   packages/*      shared libraries (music-core, memory-core, audio-core,
+#                   agent-runtime, music-mcp)
 #   apps/phonolite  frozen legacy Qt app (critical fixes only)
 #   apps/server     FastAPI application layer for the Music Agent Workbench
 # apps/web is a Node (Vite + React) project, intentionally not a uv member.
@@ -37,6 +38,8 @@ venv = ".venv"
 
 [tool.pytest.ini_options]
 testpaths = [
+    "packages/agent-runtime/tests",
+    "packages/music-mcp/tests",
     "packages/music-core/tests",
     "packages/memory-core/tests",
     "packages/audio-core/tests",
